@@ -1,0 +1,54 @@
+# Local secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa
+id_ecdsa
+id_ed25519
+known_hosts
+
+# Python environments, caches, and build products
+.venv/
+.venv-*/
+.venv-eval/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# OS/editor files
+.DS_Store
+.idea/
+.vscode/
+.claude/
+
+# Generated experiment artifacts and local runtime state.
+# Keep the dated decision log tracked; keep bulky artifacts external.
+runs/*
+!runs/progress.md
+!runs/README.md
+
+# Local / remote caches and model artifacts
+.cache/
+*.sqlite
+*.db
+*.parquet
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+
+# Reference clones are documented, not committed as nested repos.
+upstream/*
+!upstream/README.md

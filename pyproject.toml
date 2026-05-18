@@ -1,0 +1,46 @@
+[project]
+name = "polaris"
+version = "0.2.0"
+description = "POLARIS: inference-time composition for RL-style reasoning gains (frozen base model + prompt-archive spread + scalable power sampling + verifier-gated memory)"
+requires-python = ">=3.11"
+dependencies = [
+  "accelerate",
+  "datasets",
+  "huggingface-hub",
+  "numpy",
+  "pandas",
+  "pyarrow",
+  "pylatexenc",
+  "scipy",
+  "sympy",
+  "torch",
+  "tqdm",
+  "transformers==4.51.3",
+]
+
+[project.optional-dependencies]
+code = [
+  # Required when running the HumanEval+ code track (vendored evalplus)
+  "appdirs",
+  "termcolor",
+  "tree-sitter",
+  "tree-sitter-python",
+  "wget",
+]
+dc = [
+  # Required when running the Dynamic Cheatsheet comparator (vendored dc)
+  "python-dotenv",
+  "scikit-learn",
+  "tiktoken",
+]
+gepa_reflection = [
+  # Required for live xAI/OpenAI-compatible GEPA reflection calls.
+  "litellm",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

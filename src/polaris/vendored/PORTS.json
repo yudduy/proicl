@@ -1,0 +1,37 @@
+{
+  "ace": {
+    "upstream": "https://github.com/ace-agent/ace.git",
+    "commit": "4f679bef3b78e973a0e13a0acc2b4a7f6f7e41a2",
+    "license": "Apache-2.0",
+    "local_path": "src/polaris/vendored/ace",
+    "notes": "Runtime subset copied for archive/memory baseline support."
+  },
+  "dynamic-cheatsheet": {
+    "upstream": "https://github.com/suzgunmirac/dynamic-cheatsheet.git",
+    "commit": "5cfe3c37e8e52b1d858d0f3df46e7f17c50991b9",
+    "license": "MIT",
+    "local_path": "src/polaris/vendored/dc",
+    "notes": "Runtime subset copied for Dynamic Cheatsheet comparator support."
+  },
+  "evalplus": {
+    "upstream": "https://github.com/evalplus/evalplus.git",
+    "commit": "26d6d00bb1fd0fa37f39c99d5290da67891d1c5e",
+    "license": "Apache-2.0 with MIT components under evalplus/eval",
+    "local_path": "src/polaris/vendored/evalplus",
+    "notes": "Runtime subset copied for HumanEval+/MBPP+ loading and evaluation."
+  },
+  "gepa": {
+    "upstream": "https://github.com/gepa-ai/gepa.git",
+    "commit": "ce51b50cd196b539c25fae99ad0e0255c23004a4",
+    "license": "MIT",
+    "local_path": "src/polaris/vendored/gepa",
+    "notes": "Runtime subset copied for prompt archive construction."
+  },
+  "reasoning-with-sampling": {
+    "upstream": "https://github.com/aakaran/reasoning-with-sampling.git",
+    "commit": "720a8e9d084c87a630595e316f5260f1d7c3446c",
+    "license": "Unspecified in observed upstream clone",
+    "local_path": "src/polaris/vendored/rws",
+    "notes": "Runtime subset copied for RWS/Karan-Du MCMC oracle mechanics and graders."
+  }
+}
