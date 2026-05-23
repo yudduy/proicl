@@ -45,10 +45,12 @@ DEFAULT_CONDITIONS = (
 ACCURACY_BY_CONDITION = {
     "base_greedy": 0.20,
     "bon_temp1": 0.25,
+    "sps_only": 0.30,
     "mcmc_only": 0.30,
     "mixed_alpha_mcmc": 0.35,
     "fork_search": 0.32,
     "gepa_only": 0.40,
+    "gepa_sps_fixed": 0.45,
     "gepa_mcmc": 0.45,
     "gepa_mcmc_repair": 0.48,
     "gepa_mcmc_fork_repair": 0.50,
@@ -63,6 +65,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--series-root", type=Path, default=Path("runs/proicl_experiments"))
     parser.add_argument("--run-tag", default="artifact-contract")
     parser.add_argument("--tracks", nargs="+", default=list(DEFAULT_TRACKS))
+    parser.add_argument("--archive-train-tracks", nargs="+", default=None)
+    parser.add_argument("--archive-heldout-tracks", nargs="+", default=None)
     parser.add_argument("--conditions", nargs="+", default=list(DEFAULT_CONDITIONS))
     parser.add_argument(
         "--archive-scope",
@@ -188,6 +192,8 @@ def main() -> None:
     run_root = standard_run_root(args.series_root, identity)
     full_root = run_root / "full"
     full_root.mkdir(parents=True, exist_ok=True)
+    archive_train_tracks = tuple(args.archive_train_tracks or args.tracks)
+    archive_heldout_tracks = tuple(args.archive_heldout_tracks or args.tracks)
     write_run_index(
         run_root / "run_index.json",
         identity=identity,
@@ -216,8 +222,8 @@ def main() -> None:
         num_shards=args.num_shards,
         memory_num_shards=args.memory_num_shards,
         archive_scope=args.archive_scope,
-        archive_train_tracks=args.tracks,
-        archive_heldout_tracks=args.tracks,
+        archive_train_tracks=archive_train_tracks,
+        archive_heldout_tracks=archive_heldout_tracks,
         conditions=args.conditions,
     )
     plan_path = full_root / "proicl_signal_plan.json"
