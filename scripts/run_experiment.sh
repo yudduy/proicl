@@ -33,8 +33,6 @@ Environment knobs:
   SPS_ROLLOUT_HORIZON      Lookahead horizon tokens. Default: 128
   GPU_PROFILE              auto, a100, h100, or generic. Default: auto
   VLLM_PARITY_ARTIFACT     Existing calibration_summary.json. If unset, calibration is run.
-  COST_CAP_DOLLARS         Required for paid/cloud RUN_KIND values; default 0.0 for local/farmshare.
-  ESTIMATED_DOLLAR_COST_PER_CELL Default 0.0 for local/farmshare; required for paid/cloud.
   SKIP_INSTALL=1           Reuse the current environment.
   SKIP_CALIBRATION=1       Require VLLM_PARITY_ARTIFACT instead of running calibration.
   SKIP_SPS_MATH500_CALIBRATION=1 Skip the SPS-vs-MCMC MATH500 gate.
@@ -157,19 +155,6 @@ case "$GPU_PROFILE" in
     ;;
 esac
 
-if [[ "$RUN_KIND" == "local" || "$RUN_KIND" == "farmshare" ]]; then
-  COST_CAP_DOLLARS="${COST_CAP_DOLLARS:-0.0}"
-  ESTIMATED_DOLLAR_COST_PER_CELL="${ESTIMATED_DOLLAR_COST_PER_CELL:-0.0}"
-else
-  if [[ -z "${COST_CAP_DOLLARS:-}" ]]; then
-    echo "COST_CAP_DOLLARS is required for paid/cloud RUN_KIND=$RUN_KIND" >&2
-    exit 1
-  fi
-  if [[ -z "${ESTIMATED_DOLLAR_COST_PER_CELL:-}" ]]; then
-    echo "ESTIMATED_DOLLAR_COST_PER_CELL is required for paid/cloud RUN_KIND=$RUN_KIND" >&2
-    exit 1
-  fi
-fi
 ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL="${ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL:-$DEFAULT_WALL_CLOCK_SECONDS_PER_CELL}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-$DEFAULT_VLLM_GPU_MEMORY_UTILIZATION}"
 CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="${CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION:-$DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION}"
@@ -344,8 +329,6 @@ if [[ "$SKIP_SPS_MATH500_CALIBRATION" != "1" && "$SMOKE_ONLY" != "1" ]]; then
     --sps-rollouts-per-candidate "$SPS_ROLLOUTS_PER_CANDIDATE" \
     --sps-rollout-horizon "$SPS_ROLLOUT_HORIZON" \
     --vllm-parity-artifact "$CALIB_ARTIFACT" \
-    --cost-cap-dollars "$COST_CAP_DOLLARS" \
-    --estimated-dollar-cost-per-cell "$ESTIMATED_DOLLAR_COST_PER_CELL" \
     --estimated-wall-clock-seconds-per-cell "$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL" \
     --tolerance "$SPS_CALIBRATION_TOLERANCE"
   run_cmd "$PY" scripts/check_sps_calibration.py "$SPS_CALIB_DIR" \
@@ -385,8 +368,6 @@ MAIN_CMD=(
   --sps-rollout-horizon "$SPS_ROLLOUT_HORIZON"
   --num-shards "$NUM_SHARDS"
   --memory-num-shards 1
-  --cost-cap-dollars "$COST_CAP_DOLLARS"
-  --estimated-dollar-cost-per-cell "$ESTIMATED_DOLLAR_COST_PER_CELL"
   --estimated-wall-clock-seconds-per-cell "$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
   --reflection-provider "$REFLECTION_PROVIDER"
   --reflection-model-id "$REFLECTION_MODEL_ID"
