@@ -23,6 +23,7 @@ Environment knobs:
   GEPA_DEV_START/END       GEPA dev slice. Default: 0/50
   ROLLOUT_BUDGET           Samples per non-greedy condition. Default: 8
   NUM_SHARDS               Per-condition shards. Default: detected GPU count, at least 1
+  GPUS                     Optional comma-separated GPU ids; sets CUDA_VISIBLE_DEVICES.
   MAX_NEW_TOKENS           Generation cap. Default: 1024
   SPS_BLOCK_SIZE           Target SPS block size. Default: 192
   SPS_BLOCK_NUM            Override computed SPS block count.
@@ -56,6 +57,10 @@ SKIP_CALIBRATION="${SKIP_CALIBRATION:-0}"
 SKIP_SPS_MATH500_CALIBRATION="${SKIP_SPS_MATH500_CALIBRATION:-0}"
 SMOKE_ONLY="${SMOKE_ONLY:-0}"
 INCLUDE_CANDIDATES="${INCLUDE_CANDIDATES:-0}"
+
+if [[ -n "${GPUS:-}" ]]; then
+  export CUDA_VISIBLE_DEVICES="$GPUS"
+fi
 
 RUN_ROOT="${RUN_ROOT:-runs/experiment}"
 RUN_TAG="${RUN_TAG:-heldout}"
@@ -168,6 +173,7 @@ fi
 ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL="${ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL:-$DEFAULT_WALL_CLOCK_SECONDS_PER_CELL}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-$DEFAULT_VLLM_GPU_MEMORY_UTILIZATION}"
 CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="${CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION:-$DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION}"
+PARALLELISM_STRATEGY="one cell worker per visible GPU; GEPA/archive build reserves GPU 0 while direct baseline cells overlap on remaining GPUs"
 
 CACHE_ROOT="${POLARIS_CACHE_ROOT:-$REPO_ROOT/.cache/polaris}"
 export HF_HOME="${HF_HOME:-$CACHE_ROOT/huggingface}"
@@ -185,6 +191,92 @@ export VLLM_USE_V1="${VLLM_USE_V1:-0}"
 
 if [[ "$DRY_RUN" != "1" ]]; then
   mkdir -p "$RUN_ROOT" "$CACHE_ROOT" "$HF_HOME" "$PIP_CACHE_DIR"
+fi
+
+write_launch_config() {
+  local out="$1"
+  "$PY" - "$out" <<'PY'
+import json
+import os
+import sys
+
+out = sys.argv[1]
+payload = {
+    "schema": "polaris_launch_config.v1",
+    "gpu_profile": os.environ["POLARIS_GPU_PROFILE"],
+    "gpu_count": int(os.environ["POLARIS_GPU_COUNT"]),
+    "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+    "num_shards": int(os.environ["POLARIS_NUM_SHARDS"]),
+    "parallelism_strategy": os.environ["POLARIS_PARALLELISM_STRATEGY"],
+    "vllm_gpu_memory_utilization": float(os.environ["POLARIS_VLLM_GPU_MEMORY_UTILIZATION"]),
+    "calibration_vllm_gpu_memory_utilization": float(
+        os.environ["POLARIS_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION"]
+    ),
+    "estimated_wall_clock_seconds_per_cell": int(
+        os.environ["POLARIS_ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"]
+    ),
+    "run_root": os.environ["POLARIS_RUN_ROOT"],
+    "run_tag": os.environ["POLARIS_RUN_TAG"],
+    "tracks": os.environ["POLARIS_TRACKS"].split(),
+    "conditions": os.environ["POLARIS_CONDITIONS"].split(),
+    "eval_split": [
+        int(os.environ["POLARIS_EVAL_START"]),
+        int(os.environ["POLARIS_EVAL_END"]),
+    ],
+    "gepa_dev_split": [
+        int(os.environ["POLARIS_GEPA_DEV_START"]),
+        int(os.environ["POLARIS_GEPA_DEV_END"]),
+    ],
+    "rollout_budget": int(os.environ["POLARIS_ROLLOUT_BUDGET"]),
+    "max_new_tokens": int(os.environ["POLARIS_MAX_NEW_TOKENS"]),
+    "sps": {
+        "block_num": int(os.environ["POLARIS_SPS_BLOCK_NUM"]),
+        "top_k": int(os.environ["POLARIS_SPS_TOP_K"]),
+        "candidate_pool_size": int(os.environ["POLARIS_SPS_CANDIDATE_POOL_SIZE"]),
+        "rollouts_per_candidate": int(os.environ["POLARIS_SPS_ROLLOUTS_PER_CANDIDATE"]),
+        "rollout_horizon": int(os.environ["POLARIS_SPS_ROLLOUT_HORIZON"]),
+    },
+}
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(payload, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
+}
+
+print_launch_summary() {
+  echo "POLARIS launch profile:"
+  echo "  gpu_profile=$GPU_PROFILE gpu_count=$GPU_COUNT cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-all}"
+  echo "  num_shards=$NUM_SHARDS strategy=$PARALLELISM_STRATEGY"
+  echo "  vllm_gpu_memory_utilization=$VLLM_GPU_MEMORY_UTILIZATION calibration=$CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION"
+  echo "  estimated_wall_clock_seconds_per_cell=$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
+}
+
+export POLARIS_GPU_PROFILE="$GPU_PROFILE"
+export POLARIS_GPU_COUNT="$GPU_COUNT"
+export POLARIS_NUM_SHARDS="$NUM_SHARDS"
+export POLARIS_PARALLELISM_STRATEGY="$PARALLELISM_STRATEGY"
+export POLARIS_VLLM_GPU_MEMORY_UTILIZATION="$VLLM_GPU_MEMORY_UTILIZATION"
+export POLARIS_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="$CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION"
+export POLARIS_ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL="$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
+export POLARIS_RUN_ROOT="$RUN_ROOT"
+export POLARIS_RUN_TAG="$RUN_TAG"
+export POLARIS_TRACKS="$TRACKS"
+export POLARIS_CONDITIONS="$CONDITIONS"
+export POLARIS_EVAL_START="$EVAL_START"
+export POLARIS_EVAL_END="$EVAL_END"
+export POLARIS_GEPA_DEV_START="$GEPA_DEV_START"
+export POLARIS_GEPA_DEV_END="$GEPA_DEV_END"
+export POLARIS_ROLLOUT_BUDGET="$ROLLOUT_BUDGET"
+export POLARIS_MAX_NEW_TOKENS="$MAX_NEW_TOKENS"
+export POLARIS_SPS_BLOCK_NUM="$SPS_BLOCK_NUM"
+export POLARIS_SPS_TOP_K="$SPS_TOP_K"
+export POLARIS_SPS_CANDIDATE_POOL_SIZE="$SPS_CANDIDATE_POOL_SIZE"
+export POLARIS_SPS_ROLLOUTS_PER_CANDIDATE="$SPS_ROLLOUTS_PER_CANDIDATE"
+export POLARIS_SPS_ROLLOUT_HORIZON="$SPS_ROLLOUT_HORIZON"
+
+print_launch_summary
+if [[ "$DRY_RUN" != "1" ]]; then
+  write_launch_config "$RUN_ROOT/launch_config.json"
 fi
 
 run_cmd() {
@@ -335,6 +427,7 @@ if [[ -z "$RUN_DIR" ]]; then
   echo "Could not identify standardized run directory under $RUN_ROOT" >&2
   exit 1
 fi
+cp "$RUN_ROOT/launch_config.json" "$RUN_DIR/launch_config.json"
 
 PACKAGE_ROOT="$RUN_DIR"
 if [[ "$SMOKE_ONLY" == "1" ]]; then
