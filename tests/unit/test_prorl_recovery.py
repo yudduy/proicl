@@ -552,6 +552,22 @@ def test_reasoning_gym_verifier_fails_closed_on_bad_json_shape(monkeypatch):
     assert result["scorer_error"].startswith("AttributeError")
 
 
+def test_reasoning_gym_game_of_life_halting_uses_exact_boolean():
+    from polaris.evals.verifiers.reasoning_gym import score_reasoning_gym
+
+    reference = json.dumps(
+        {
+            "task": "game_of_life_halting",
+            "entry": {"answer": "False"},
+            "answer": "False",
+        }
+    )
+
+    assert score_reasoning_gym("answer: False", reference)["passed"] is True
+    assert score_reasoning_gym("answer: True", reference)["passed"] is False
+    assert score_reasoning_gym("answer: deliberately wrong", reference)["passed"] is False
+
+
 def test_hf_generator_passes_revision_to_transformers(monkeypatch):
     seen = {"tokenizer": None, "model": None}
 

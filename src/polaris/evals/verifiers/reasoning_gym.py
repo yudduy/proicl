@@ -84,6 +84,16 @@ def _json_loads_or_none(text: str):
         return None
 
 
+def _score_task_override(*, task: str, answer: str, entry: dict) -> float | None:
+    if task == "game_of_life_halting":
+        expected = str(entry.get("answer", "")).strip().lower()
+        got = answer.strip().lower()
+        if got not in {"true", "false"}:
+            return 0.0
+        return 1.0 if got == expected else 0.0
+    return None
+
+
 def _base_feedback(*, answer: str, score: float, scorer_error: str | None) -> dict:
     format_valid = bool(answer.strip())
     failure_type = None
@@ -203,13 +213,17 @@ def score_reasoning_gym(generation: str, reference: str) -> dict:
         got = answer.strip().lower()
         score = 1.0 if got == expected else 0.0
     else:
-        dataset = reasoning_gym.create_dataset(task, size=1, seed=0)
-        try:
-            score = float(dataset.score_answer(answer=answer, entry=entry))
-            scorer_error = None
-        except Exception as exc:  # Badly shaped model answers should fail the candidate, not the run.
-            score = 0.0
-            scorer_error = f"{type(exc).__name__}: {exc}"
+        override = _score_task_override(task=task, answer=answer, entry=entry)
+        if override is not None:
+            score = override
+        else:
+            dataset = reasoning_gym.create_dataset(task, size=1, seed=0)
+            try:
+                score = float(dataset.score_answer(answer=answer, entry=entry))
+                scorer_error = None
+            except Exception as exc:  # Badly shaped model answers should fail the candidate, not the run.
+                score = 0.0
+                scorer_error = f"{type(exc).__name__}: {exc}"
     result = {
         "score": score,
         "passed": score >= 1.0,
