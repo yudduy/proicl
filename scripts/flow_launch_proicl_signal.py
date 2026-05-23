@@ -188,7 +188,7 @@ def _install(info: dict[str, Any]) -> None:
         f"python3 -m venv {REMOTE_VENV}; "
         f". {REMOTE_VENV}/bin/activate; "
         "python -m pip install --upgrade pip; "
-        "python -m pip install -e '.[gepa_reflection]' reasoning-gym",
+        "python -m pip install -e '.[gepa_reflection]' reasoning-gym==0.1.25",
     )
 
 

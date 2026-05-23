@@ -40,6 +40,11 @@ class RWSGenerator:
         seed: int = SEED,
         local_files_only: bool = False,
         revision: str | None = None,
+        torch_dtype: str = "auto",
+        score_segments_mode: str = "forward",
+        device_map_auto: bool = True,
+        use_chat_template: bool | None = None,
+        assistant_prefill: str | None = None,
     ) -> None:
         import torch
         import transformers
@@ -55,6 +60,13 @@ class RWSGenerator:
         self.model_id = model_id
         self.revision = revision
         self.device = device
+        self.torch_dtype = torch_dtype
+        self.device_map_auto = bool(device_map_auto)
+        if score_segments_mode not in {"forward", "cached_decode"}:
+            raise ValueError(
+                "score_segments_mode must be one of {'forward', 'cached_decode'}"
+            )
+        self.score_segments_mode = score_segments_mode
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_id,
             revision=revision,
@@ -64,13 +76,29 @@ class RWSGenerator:
         self.model = transformers.AutoModelForCausalLM.from_pretrained(
             model_id,
             revision=revision,
-            torch_dtype="auto",
-            device_map="auto",
+            torch_dtype=self._resolve_torch_dtype(torch_dtype),
+            device_map="auto" if self.device_map_auto else None,
             trust_remote_code=False,
             local_files_only=local_files_only,
         )
+        if not self.device_map_auto:
+            self.model = self.model.to(device)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        if use_chat_template is None:
+            use_chat_template = (
+                callable(getattr(self.tokenizer, "apply_chat_template", None))
+                and (
+                    "DeepSeek-R1-Distill-Qwen" in model_id
+                    or "Nemotron-Research-Reasoning-Qwen" in model_id
+                )
+            )
+        self.use_chat_template = bool(use_chat_template)
+        self.assistant_prefill = (
+            assistant_prefill
+            if assistant_prefill is not None
+            else ("</think>\n\nAnswer:" if self.use_chat_template else "")
+        )
         self.autoreg_sampler = AutoregressiveSampler(self.model, self.tokenizer, device)
 
     def runtime_metadata(self) -> dict:
@@ -81,11 +109,29 @@ class RWSGenerator:
             "model_revision": self.revision,
             "tokenizer_revision": self.revision,
             "device": self.device,
+            "torch_dtype": self.torch_dtype,
+            "device_map_auto": self.device_map_auto,
+            "score_segments_mode": self.score_segments_mode,
             "tokenizer_special_tokens": {
                 "pad_token_id": self.tokenizer.pad_token_id,
                 "eos_token_id": self.tokenizer.eos_token_id,
             },
+            "use_chat_template": self.use_chat_template,
+            "assistant_prefill": self.assistant_prefill,
         }
+
+    def _resolve_torch_dtype(self, torch_dtype: str):
+        if torch_dtype == "auto":
+            return "auto"
+        if torch_dtype == "float32":
+            return self.torch.float32
+        if torch_dtype == "bfloat16":
+            return self.torch.bfloat16
+        if torch_dtype == "float16":
+            return self.torch.float16
+        raise ValueError(
+            "torch_dtype must be one of {'auto', 'float32', 'bfloat16', 'float16'}"
+        )
 
     def set_seed(self, seed: int) -> None:
         random.seed(seed)
@@ -95,7 +141,32 @@ class RWSGenerator:
             self.torch.cuda.manual_seed_all(seed)
 
     def encode(self, text: str):
-        return self.tokenizer.encode(text, return_tensors="pt").to(self.device)
+        return self.tokenizer.encode(self._render_prompt(text), return_tensors="pt").to(self.device)
+
+    def next_token_distribution(self, prompt_text: str, *, top_k: int = 4) -> list[tuple[str, float]]:
+        input_ids = self.encode(prompt_text)
+        with self.torch.no_grad():
+            out = self.model(input_ids=input_ids)
+        logits = out.logits[0, -1, :].float()
+        probs = self.torch.softmax(logits, dim=-1)
+        values, indices = self.torch.topk(probs, k=top_k)
+        return [
+            (
+                self.tokenizer.decode([int(idx)], skip_special_tokens=False),
+                float(prob),
+            )
+            for prob, idx in zip(values.detach().cpu(), indices.detach().cpu())
+        ]
+
+    def _render_prompt(self, text: str) -> str:
+        if not self.use_chat_template:
+            return text
+        rendered = self.tokenizer.apply_chat_template(
+            [{"role": "user", "content": text}],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        return rendered + self.assistant_prefill
 
     def generate_greedy(
         self,
@@ -156,16 +227,17 @@ class RWSGenerator:
             block_num=block_num,
         )
         elapsed = time.monotonic() - started
+        continuation_ids = full_ids[len(prefix) :]
         decoded = self.tokenizer.decode(
-            self.torch.tensor(full_ids, dtype=self.torch.long).to("cpu"),
+            self.torch.tensor(continuation_ids, dtype=self.torch.long).to("cpu"),
             skip_special_tokens=True,
         )
         output_tokens = max(0, len(full_ids) - len(prefix))
         cost = estimate_cost(len(prefix), output_tokens)
         return Generation(
-            generation=decoded,
+            generation=self.assistant_prefill + decoded,
             prompt_text=prompt_text,
-            response_contains_prompt=True,
+            response_contains_prompt=False,
             prompt_token_count=len(prefix),
             generation_token_count=output_tokens,
             wall_clock_seconds=elapsed,
@@ -181,6 +253,25 @@ class RWSGenerator:
         temperature: float,
     ) -> ScoreBatch:
         """HF correctness-oracle scoring for already chosen target segments."""
+        if self.score_segments_mode == "cached_decode":
+            return self._score_segments_cached_decode(
+                prefix_ids_batch,
+                target_segments_batch,
+                temperature=temperature,
+            )
+        return self._score_segments_forward(
+            prefix_ids_batch,
+            target_segments_batch,
+            temperature=temperature,
+        )
+
+    def _score_segments_forward(
+        self,
+        prefix_ids_batch: list[list[int]],
+        target_segments_batch: list[list[int]],
+        *,
+        temperature: float,
+    ) -> ScoreBatch:
         import torch.nn.functional as F
 
         if len(prefix_ids_batch) != len(target_segments_batch):
@@ -234,6 +325,92 @@ class RWSGenerator:
             lp_unnorm_tokens=lp_unnorm_tokens,
         )
 
+    def _score_segments_cached_decode(
+        self,
+        prefix_ids_batch: list[list[int]],
+        target_segments_batch: list[list[int]],
+        *,
+        temperature: float,
+    ) -> ScoreBatch:
+        """Score fixed continuations with decode-time HF cache semantics."""
+        import torch.nn.functional as F
+
+        if len(prefix_ids_batch) != len(target_segments_batch):
+            raise ValueError("prefix_ids_batch and target_segments_batch length mismatch")
+
+        lp_norm: list[float] = []
+        lp_unnorm: list[float] = []
+        lp_norm_tokens: list[list[float]] = []
+        lp_unnorm_tokens: list[list[float]] = []
+        device = next(self.model.parameters()).device
+        for prefix_ids, target_ids in zip(prefix_ids_batch, target_segments_batch):
+            if not prefix_ids:
+                raise ValueError("prefix_ids must be non-empty to score next-token targets")
+            if not target_ids:
+                lp_norm.append(0.0)
+                lp_unnorm.append(0.0)
+                lp_norm_tokens.append([])
+                lp_unnorm_tokens.append([])
+                continue
+
+            current = self.torch.tensor(
+                [list(prefix_ids)], dtype=self.torch.long, device=device
+            )
+            attention_mask = self.torch.ones(
+                (1, len(prefix_ids)), dtype=self.torch.long, device=device
+            )
+            past = None
+            norm_list: list[float] = []
+            unnorm_list: list[float] = []
+            for pos, target_id in enumerate(target_ids):
+                with self.torch.no_grad():
+                    out = self.model(
+                        input_ids=current,
+                        attention_mask=attention_mask,
+                        past_key_values=past,
+                        use_cache=True,
+                    )
+                row = out.logits[0, -1, :].float()
+                target = int(target_id)
+                norm_list.append(
+                    float(
+                        F.log_softmax(row / temperature, dim=-1)[target]
+                        .detach()
+                        .cpu()
+                    )
+                )
+                unnorm_list.append(
+                    float(
+                        (
+                            (1.0 / temperature)
+                            * F.log_softmax(row, dim=-1)[target]
+                        )
+                        .detach()
+                        .cpu()
+                    )
+                )
+                past = out.past_key_values
+                current = self.torch.tensor(
+                    [[target]], dtype=self.torch.long, device=device
+                )
+                attention_mask = self.torch.ones(
+                    (1, len(prefix_ids) + pos + 1),
+                    dtype=self.torch.long,
+                    device=device,
+                )
+                del out, row
+            lp_norm_tokens.append(norm_list)
+            lp_unnorm_tokens.append(unnorm_list)
+            lp_norm.append(float(sum(norm_list)))
+            lp_unnorm.append(float(sum(unnorm_list)))
+
+        return ScoreBatch(
+            lp_norm=lp_norm,
+            lp_unnorm=lp_unnorm,
+            lp_norm_tokens=lp_norm_tokens,
+            lp_unnorm_tokens=lp_unnorm_tokens,
+        )
+
     def _hf_generate(
         self,
         prompt_text: str,
@@ -261,7 +438,7 @@ class RWSGenerator:
         text = self.tokenizer.decode(generated_ids, skip_special_tokens=True)
         cost = estimate_cost(len(input_ids[0]), len(generated_ids))
         return Generation(
-            generation=text,
+            generation=self.assistant_prefill + text,
             prompt_text=prompt_text,
             response_contains_prompt=False,
             prompt_token_count=len(input_ids[0]),

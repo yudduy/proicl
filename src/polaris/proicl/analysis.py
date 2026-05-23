@@ -7,18 +7,22 @@ from typing import Any, Mapping
 
 _REQUIRED_KEYS = (
     "base",
-    "mcmc_only",
-    "gepa_only",
-    "gepa_mcmc",
-    "gepa_mcmc_memory",
     "prorl_v2_greedy",
 )
 
 _DIR_TO_ACCURACY_KEY = {
     "base_greedy": "base",
+    "bon_temp1": "bon_temp1",
+    "sps_only": "sps_only",
     "mcmc_only": "mcmc_only",
+    "mixed_alpha_mcmc": "mixed_alpha_mcmc",
+    "fork_search": "fork_search",
     "gepa_only": "gepa_only",
+    "gepa_sps_fixed": "gepa_sps_fixed",
     "gepa_mcmc": "gepa_mcmc",
+    "gepa_mcmc_repair": "gepa_mcmc_repair",
+    "gepa_mcmc_fork_repair": "gepa_mcmc_fork_repair",
+    "gepa_mcmc_fork_repair_memory": "gepa_mcmc_fork_repair_memory",
     "gepa_mcmc_memory": "gepa_mcmc_memory",
     "prorl_v2_greedy": "prorl_v2_greedy",
 }
@@ -46,31 +50,71 @@ def compute_proicl_decomposition(accuracies: Mapping[str, float]) -> dict[str, A
         raise ValueError("missing ProICL accuracies: " + ", ".join(missing))
 
     base = _accuracy(accuracies, "base")
-    mcmc = _accuracy(accuracies, "mcmc_only")
-    gepa = _accuracy(accuracies, "gepa_only")
-    gepa_mcmc = _accuracy(accuracies, "gepa_mcmc")
-    memory = _accuracy(accuracies, "gepa_mcmc_memory")
+    bon = float(accuracies.get("bon_temp1", base))
+    sps = float(accuracies.get("sps_only", accuracies.get("mcmc_only", bon)))
+    mcmc = float(accuracies.get("mcmc_only", accuracies.get("sps_only", bon)))
+    mixed = float(accuracies.get("mixed_alpha_mcmc", mcmc))
+    fork = float(accuracies.get("fork_search", bon))
+    gepa = float(accuracies.get("gepa_only", bon))
+    gepa_sps_fixed = float(
+        accuracies.get("gepa_sps_fixed", accuracies.get("gepa_mcmc", max(gepa, sps)))
+    )
+    gepa_mcmc = float(accuracies.get("gepa_mcmc", accuracies.get("gepa_sps_fixed", max(gepa, mixed))))
+    repair = float(accuracies.get("gepa_mcmc_repair", gepa_mcmc))
+    fork_repair = float(accuracies.get("gepa_mcmc_fork_repair", max(fork, repair)))
+    full_memory = float(
+        accuracies.get(
+            "gepa_mcmc_fork_repair_memory",
+            accuracies.get("gepa_mcmc_memory", fork_repair),
+        )
+    )
+    preliminary_memory = float(accuracies.get("gepa_mcmc_memory", full_memory))
     prorl = _accuracy(accuracies, "prorl_v2_greedy")
 
     rf_denominator = prorl - base
     rf_valid = rf_denominator > 0.0
     report = {
         "A_base": base,
+        "A_bon": bon,
+        "A_sps": sps,
         "A_mcmc": mcmc,
+        "A_mixed": mixed,
+        "A_fork": fork,
         "A_gepa": gepa,
+        "A_gepa_sps_fixed": gepa_sps_fixed,
         "A_gepa_mcmc": gepa_mcmc,
-        "A_memory": memory,
+        "A_repair": repair,
+        "A_fork_repair": fork_repair,
+        "A_full_memory": full_memory,
+        "A_memory": preliminary_memory,
         "A_prorl_v2": prorl,
         "rf_denominator": rf_denominator,
         "rf_valid": rf_valid,
+        "RF_bon": _rf(base=base, recovered=bon, trained=prorl),
+        "RF_sps": _rf(base=base, recovered=sps, trained=prorl),
         "RF_mcmc": _rf(base=base, recovered=mcmc, trained=prorl),
+        "RF_mixed": _rf(base=base, recovered=mixed, trained=prorl),
+        "RF_fork": _rf(base=base, recovered=fork, trained=prorl),
         "RF_gepa": _rf(base=base, recovered=gepa, trained=prorl),
+        "RF_gepa_sps_fixed": _rf(base=base, recovered=gepa_sps_fixed, trained=prorl),
         "RF_gepa_mcmc": _rf(base=base, recovered=gepa_mcmc, trained=prorl),
-        "RF_memory": _rf(base=base, recovered=memory, trained=prorl),
-        "slow_weight_residual": prorl - gepa_mcmc,
-        "memory_gain": memory - gepa_mcmc,
+        "RF_repair": _rf(base=base, recovered=repair, trained=prorl),
+        "RF_fork_repair": _rf(base=base, recovered=fork_repair, trained=prorl),
+        "RF_full_memory": _rf(base=base, recovered=full_memory, trained=prorl),
+        "RF_memory": _rf(base=base, recovered=preliminary_memory, trained=prorl),
+        "slow_weight_residual": prorl - full_memory,
+        "sharpening_gain": mcmc - bon,
+        "sps_gain": sps - bon,
+        "mixed_alpha_gain": mixed - mcmc,
+        "fork_gain": fork - bon,
+        "prompt_archive_gain": gepa - bon,
+        "repair_gain": repair - gepa_mcmc,
+        "fork_repair_gain": fork_repair - repair,
+        "memory_gain": full_memory - fork_repair,
+        "preliminary_memory_gain": preliminary_memory - gepa_mcmc,
         "discovery_gain": gepa - mcmc,
-        "composition_gain": gepa_mcmc - max(mcmc, gepa),
+        "composition_gain": gepa_mcmc - max(mixed, gepa),
+        "sps_composition_gain": gepa_sps_fixed - max(sps, gepa),
     }
     if not rf_valid:
         report["analysis_warning"] = (
@@ -99,23 +143,47 @@ def write_proicl_decomposition(
         "# ProICL decomposition",
         "",
         f"- A_base: {report['A_base']:.6f}",
+        f"- A_bon: {report['A_bon']:.6f}",
+        f"- A_sps: {report['A_sps']:.6f}",
         f"- A_mcmc: {report['A_mcmc']:.6f}",
+        f"- A_mixed: {report['A_mixed']:.6f}",
+        f"- A_fork: {report['A_fork']:.6f}",
         f"- A_gepa: {report['A_gepa']:.6f}",
+        f"- A_gepa_sps_fixed: {report['A_gepa_sps_fixed']:.6f}",
         f"- A_gepa_mcmc: {report['A_gepa_mcmc']:.6f}",
+        f"- A_repair: {report['A_repair']:.6f}",
+        f"- A_fork_repair: {report['A_fork_repair']:.6f}",
+        f"- A_full_memory: {report['A_full_memory']:.6f}",
         f"- A_memory: {report['A_memory']:.6f}",
         f"- A_prorl_v2: {report['A_prorl_v2']:.6f}",
         "",
         f"- rf_denominator: {report['rf_denominator']:.6f}",
         f"- rf_valid: {report['rf_valid']}",
+        f"- RF_bon: {_fmt(report['RF_bon'])}",
+        f"- RF_sps: {_fmt(report['RF_sps'])}",
         f"- RF_mcmc: {_fmt(report['RF_mcmc'])}",
+        f"- RF_mixed: {_fmt(report['RF_mixed'])}",
+        f"- RF_fork: {_fmt(report['RF_fork'])}",
         f"- RF_gepa: {_fmt(report['RF_gepa'])}",
+        f"- RF_gepa_sps_fixed: {_fmt(report['RF_gepa_sps_fixed'])}",
         f"- RF_gepa_mcmc: {_fmt(report['RF_gepa_mcmc'])}",
+        f"- RF_repair: {_fmt(report['RF_repair'])}",
+        f"- RF_fork_repair: {_fmt(report['RF_fork_repair'])}",
+        f"- RF_full_memory: {_fmt(report['RF_full_memory'])}",
         f"- RF_memory: {_fmt(report['RF_memory'])}",
         "",
         f"- slow_weight_residual: {report['slow_weight_residual']:.6f}",
+        f"- sharpening_gain: {report['sharpening_gain']:.6f}",
+        f"- sps_gain: {report['sps_gain']:.6f}",
+        f"- mixed_alpha_gain: {report['mixed_alpha_gain']:.6f}",
+        f"- fork_gain: {report['fork_gain']:.6f}",
+        f"- prompt_archive_gain: {report['prompt_archive_gain']:.6f}",
+        f"- repair_gain: {report['repair_gain']:.6f}",
+        f"- fork_repair_gain: {report['fork_repair_gain']:.6f}",
         f"- memory_gain: {report['memory_gain']:.6f}",
         f"- discovery_gain: {report['discovery_gain']:.6f}",
         f"- composition_gain: {report['composition_gain']:.6f}",
+        f"- sps_composition_gain: {report['sps_composition_gain']:.6f}",
     ]
     if report.get("analysis_warning"):
         lines.extend(["", f"- warning: {report['analysis_warning']}"])
@@ -174,18 +242,40 @@ def write_proicl_decomposition_by_track(
                 f"## {track}",
                 "",
                 f"- A_base: {report['A_base']:.6f}",
+                f"- A_bon: {report['A_bon']:.6f}",
+                f"- A_sps: {report['A_sps']:.6f}",
                 f"- A_mcmc: {report['A_mcmc']:.6f}",
+                f"- A_mixed: {report['A_mixed']:.6f}",
+                f"- A_fork: {report['A_fork']:.6f}",
                 f"- A_gepa: {report['A_gepa']:.6f}",
+                f"- A_gepa_sps_fixed: {report['A_gepa_sps_fixed']:.6f}",
                 f"- A_gepa_mcmc: {report['A_gepa_mcmc']:.6f}",
+                f"- A_repair: {report['A_repair']:.6f}",
+                f"- A_fork_repair: {report['A_fork_repair']:.6f}",
+                f"- A_full_memory: {report['A_full_memory']:.6f}",
                 f"- A_memory: {report['A_memory']:.6f}",
                 f"- A_prorl_v2: {report['A_prorl_v2']:.6f}",
                 f"- rf_denominator: {report['rf_denominator']:.6f}",
                 f"- rf_valid: {report['rf_valid']}",
+                f"- RF_bon: {_fmt(report['RF_bon'])}",
+                f"- RF_sps: {_fmt(report['RF_sps'])}",
                 f"- RF_mcmc: {_fmt(report['RF_mcmc'])}",
+                f"- RF_mixed: {_fmt(report['RF_mixed'])}",
+                f"- RF_fork: {_fmt(report['RF_fork'])}",
                 f"- RF_gepa: {_fmt(report['RF_gepa'])}",
+                f"- RF_gepa_sps_fixed: {_fmt(report['RF_gepa_sps_fixed'])}",
                 f"- RF_gepa_mcmc: {_fmt(report['RF_gepa_mcmc'])}",
+                f"- RF_repair: {_fmt(report['RF_repair'])}",
+                f"- RF_fork_repair: {_fmt(report['RF_fork_repair'])}",
+                f"- RF_full_memory: {_fmt(report['RF_full_memory'])}",
                 f"- RF_memory: {_fmt(report['RF_memory'])}",
                 f"- slow_weight_residual: {report['slow_weight_residual']:.6f}",
+                f"- sharpening_gain: {report['sharpening_gain']:.6f}",
+                f"- mixed_alpha_gain: {report['mixed_alpha_gain']:.6f}",
+                f"- fork_gain: {report['fork_gain']:.6f}",
+                f"- prompt_archive_gain: {report['prompt_archive_gain']:.6f}",
+                f"- repair_gain: {report['repair_gain']:.6f}",
+                f"- fork_repair_gain: {report['fork_repair_gain']:.6f}",
                 f"- memory_gain: {report['memory_gain']:.6f}",
                 f"- discovery_gain: {report['discovery_gain']:.6f}",
                 f"- composition_gain: {report['composition_gain']:.6f}",

@@ -30,12 +30,11 @@ vllm_image = (
     .entrypoint([])
     .run_commands(
         "ln -sf $(command -v python3) /usr/local/bin/python",
-        "python -m pip install hf-transfer==0.1.8 huggingface-hub pylatexenc sympy",
+        "python -m pip install hf-transfer==0.1.8 'huggingface-hub[hf_xet]' datasets pandas pylatexenc sympy reasoning-gym==0.1.25",
     )
     .env(
         {
             "HF_HUB_ENABLE_HF_TRANSFER": "1",
-            "HF_HUB_DISABLE_XET": "1",
         }
     )
     .add_local_dir(str(POLARIS_ROOT), remote_path="/polaris", copy=True, ignore=_IGNORE)
@@ -55,7 +54,6 @@ def _setup_paths() -> None:
     os.environ["HF_HUB_CACHE"] = "/cache/huggingface/hub"
     os.environ["TRANSFORMERS_CACHE"] = "/cache/huggingface"
     os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
-    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 
 def _require_modal_preflight(
@@ -89,10 +87,17 @@ def _require_modal_preflight(
     )
 
 
-def _ensure_model_cached(model_id: str) -> str:
+def _ensure_model_cached(model_id: str, revision: str | None = None) -> str:
+    import os
+
     from huggingface_hub import snapshot_download
 
-    return snapshot_download(model_id)
+    # Snapshot download is a setup step, not the timed inference path. Avoid
+    # hf_transfer's opaque failures on Xet-backed repos and let hf_xet/HTTP
+    # handle the model cache deterministically.
+    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+    os.environ.pop("HF_HUB_DISABLE_XET", None)
+    return snapshot_download(model_id, revision=revision)
 
 
 def _run_python_json(script: str) -> dict:
@@ -754,6 +759,12 @@ def smoke_vllm_score_parity(
     user_authorized_paid_run: bool = False,
 ) -> dict:
     """Write score_parity.jsonl plus the full HF-vLLM calibration bundle."""
+    _require_modal_preflight(
+        backend="vllm",
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+    )
     return _run_calibration_artifact_smoke(
         gate="score_parity",
         temperature=temperature,
@@ -781,6 +792,12 @@ def smoke_vllm_mh_replay_parity(
     user_authorized_paid_run: bool = False,
 ) -> dict:
     """Write mh_replay_parity.jsonl plus the full HF-vLLM calibration bundle."""
+    _require_modal_preflight(
+        backend="vllm",
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+    )
     return _run_calibration_artifact_smoke(
         gate="mh_replay_parity",
         temperature=temperature,
@@ -808,6 +825,12 @@ def smoke_vllm_full_chain_replay(
     user_authorized_paid_run: bool = False,
 ) -> dict:
     """Write full_chain_replay.json plus the full HF-vLLM calibration bundle."""
+    _require_modal_preflight(
+        backend="vllm",
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+    )
     return _run_calibration_artifact_smoke(
         gate="full_chain_replay",
         temperature=temperature,
@@ -820,15 +843,16 @@ def smoke_vllm_full_chain_replay(
     )
 
 
-@app.function(
-    gpu="H100",
-    timeout=3600,
-    volumes={"/cache/huggingface": hf_cache},
-)
-def smoke_proicl_one_problem_vllm_native(
+def _smoke_proicl_one_problem_vllm_native_impl(
+    *,
     condition: str = "single_prompt_power",
-    scoring_mode: str = "native_segment",
+    power_sampler: str = "mcmc",
+    scoring_mode: str = "forced_decode_v0",
     max_new_tokens: int = 64,
+    sps_top_k: int = 2,
+    sps_candidate_pool_size: int = 2,
+    sps_rollouts_per_candidate: int = 1,
+    sps_rollout_horizon: int = 16,
     estimated_dollar_cost: float | None = None,
     cost_cap_dollars: float | None = None,
     user_authorized_paid_run: bool = False,
@@ -837,7 +861,9 @@ def smoke_proicl_one_problem_vllm_native(
     _setup_paths()
     from polaris.registry import resolve_model
 
-    model_id = resolve_model("deepseek-r1-distill-qwen-1.5b").hf_id
+    model = resolve_model("deepseek-r1-distill-qwen-1.5b")
+    model_id = model.hf_id
+    model_revision = model.revision
     _require_modal_preflight(
         backend="vllm",
         estimated_dollar_cost=estimated_dollar_cost,
@@ -846,7 +872,7 @@ def smoke_proicl_one_problem_vllm_native(
         artifact_dir="/tmp/proicl-one-problem-vllm",
         model_id=model_id,
     )
-    _ensure_model_cached(model_id)
+    _ensure_model_cached(model_id, revision=model_revision)
     summary = _run_python_json(
         f"""
 import json
@@ -867,6 +893,39 @@ subprocess.run(
     check=True,
     text=True,
 )
+calibration = root / "calibration"
+subprocess.run(
+    [
+        "python",
+        "/polaris/scripts/vllm_hf_calibration.py",
+        "--model-id",
+        {model_id!r},
+        "--model-revision",
+        {model_revision!r},
+        "--out",
+        str(calibration),
+        "--temperature",
+        "0.25",
+        "--hf-dtype",
+        "float32",
+        "--hf-scoring-mode",
+        "cached_decode",
+        "--segment-lens",
+        "1",
+        "2",
+        "8",
+        "--vllm-scoring-mode",
+        {scoring_mode!r},
+        "--vllm-dtype",
+        "float32",
+        "--vllm-model-impl",
+        "transformers",
+        "--vllm-max-model-len",
+        "4096",
+    ],
+    check=True,
+    text=True,
+)
 out = root / "run"
 cmd = [
     "python",
@@ -875,6 +934,8 @@ cmd = [
     "reasoning_gym_boxnet",
     "--model-key",
     "deepseek-r1-distill-qwen-1.5b",
+    "--model-revision",
+    {model_revision!r},
     "--condition",
     {condition!r},
     "--archive",
@@ -896,6 +957,18 @@ cmd = [
     "1",
     "--max-new-tokens",
     str({int(max_new_tokens)}),
+    "--sps-block-num",
+    "2",
+    "--power-sampler",
+    {power_sampler!r},
+    "--sps-top-k",
+    str({int(sps_top_k)}),
+    "--sps-candidate-pool-size",
+    str({int(sps_candidate_pool_size)}),
+    "--sps-rollouts-per-candidate",
+    str({int(sps_rollouts_per_candidate)}),
+    "--sps-rollout-horizon",
+    str({int(sps_rollout_horizon)}),
     "--vllm-scoring-mode",
     {scoring_mode!r},
     "--vllm-dtype",
@@ -904,11 +977,12 @@ cmd = [
     "transformers",
     "--vllm-max-model-len",
     "4096",
+    "--vllm-parity-artifact",
+    str(calibration / "calibration_summary.json"),
     "--run-stage",
     "smoke",
     "--run-kind",
     "modal",
-    "--local-files-only",
 ]
 subprocess.run(cmd, check=True, text=True)
 metrics = json.loads((out / "metrics.json").read_text())
@@ -924,3 +998,172 @@ print("POLARIS_JSON:" + json.dumps(summary, sort_keys=True))
     )
     print(f"smoke_proicl_one_problem_vllm_native: {summary}")
     return summary
+
+
+@app.function(
+    gpu="H100",
+    timeout=3600,
+    volumes={"/cache/huggingface": hf_cache},
+)
+def smoke_proicl_one_problem_vllm_native(
+    condition: str = "single_prompt_power",
+    power_sampler: str = "mcmc",
+    scoring_mode: str = "forced_decode_v0",
+    max_new_tokens: int = 64,
+    sps_top_k: int = 2,
+    sps_candidate_pool_size: int = 2,
+    sps_rollouts_per_candidate: int = 1,
+    sps_rollout_horizon: int = 16,
+    estimated_dollar_cost: float | None = None,
+    cost_cap_dollars: float | None = None,
+    user_authorized_paid_run: bool = False,
+) -> dict:
+    """Run one ProICL/Reasoning-Gym problem through run_condition with vLLM on H100."""
+    _setup_paths()
+    _require_modal_preflight(
+        backend="vllm",
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+        artifact_dir="/tmp/proicl-one-problem-vllm",
+        model_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    )
+    return _smoke_proicl_one_problem_vllm_native_impl(
+        condition=condition,
+        power_sampler=power_sampler,
+        scoring_mode=scoring_mode,
+        max_new_tokens=max_new_tokens,
+        sps_top_k=sps_top_k,
+        sps_candidate_pool_size=sps_candidate_pool_size,
+        sps_rollouts_per_candidate=sps_rollouts_per_candidate,
+        sps_rollout_horizon=sps_rollout_horizon,
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+    )
+
+
+@app.function(
+    gpu="A100-40GB",
+    timeout=3600,
+    volumes={"/cache/huggingface": hf_cache},
+)
+def smoke_proicl_one_problem_vllm_a100_40gb(
+    condition: str = "single_prompt_power",
+    power_sampler: str = "mcmc",
+    scoring_mode: str = "forced_decode_v0",
+    max_new_tokens: int = 64,
+    sps_top_k: int = 2,
+    sps_candidate_pool_size: int = 2,
+    sps_rollouts_per_candidate: int = 1,
+    sps_rollout_horizon: int = 16,
+    estimated_dollar_cost: float | None = None,
+    cost_cap_dollars: float | None = None,
+    user_authorized_paid_run: bool = False,
+) -> dict:
+    """Run the exact ProICL/vLLM power-sampling smoke on Modal A100 40GB."""
+    _setup_paths()
+    _require_modal_preflight(
+        backend="vllm",
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+        artifact_dir="/tmp/proicl-one-problem-vllm",
+        model_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    )
+    return _smoke_proicl_one_problem_vllm_native_impl(
+        condition=condition,
+        power_sampler=power_sampler,
+        scoring_mode=scoring_mode,
+        max_new_tokens=max_new_tokens,
+        sps_top_k=sps_top_k,
+        sps_candidate_pool_size=sps_candidate_pool_size,
+        sps_rollouts_per_candidate=sps_rollouts_per_candidate,
+        sps_rollout_horizon=sps_rollout_horizon,
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+    )
+
+
+@app.function(
+    gpu="A100-80GB",
+    timeout=3600,
+    volumes={"/cache/huggingface": hf_cache},
+)
+def smoke_proicl_one_problem_vllm_a100_80gb(
+    condition: str = "single_prompt_power",
+    power_sampler: str = "mcmc",
+    scoring_mode: str = "forced_decode_v0",
+    max_new_tokens: int = 64,
+    sps_top_k: int = 2,
+    sps_candidate_pool_size: int = 2,
+    sps_rollouts_per_candidate: int = 1,
+    sps_rollout_horizon: int = 16,
+    estimated_dollar_cost: float | None = None,
+    cost_cap_dollars: float | None = None,
+    user_authorized_paid_run: bool = False,
+) -> dict:
+    """Run the exact ProICL/vLLM power-sampling smoke on Modal A100 80GB."""
+    _setup_paths()
+    _require_modal_preflight(
+        backend="vllm",
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+        artifact_dir="/tmp/proicl-one-problem-vllm",
+        model_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    )
+    return _smoke_proicl_one_problem_vllm_native_impl(
+        condition=condition,
+        power_sampler=power_sampler,
+        scoring_mode=scoring_mode,
+        max_new_tokens=max_new_tokens,
+        sps_top_k=sps_top_k,
+        sps_candidate_pool_size=sps_candidate_pool_size,
+        sps_rollouts_per_candidate=sps_rollouts_per_candidate,
+        sps_rollout_horizon=sps_rollout_horizon,
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+    )
+
+
+@app.function(
+    gpu="A100-80GB",
+    timeout=3600,
+    volumes={"/cache/huggingface": hf_cache},
+)
+def smoke_sps_recovery_one_problem_a100_80gb(
+    max_new_tokens: int = 64,
+    sps_top_k: int = 2,
+    sps_candidate_pool_size: int = 2,
+    sps_rollouts_per_candidate: int = 1,
+    sps_rollout_horizon: int = 16,
+    estimated_dollar_cost: float | None = None,
+    cost_cap_dollars: float | None = None,
+    user_authorized_paid_run: bool = False,
+) -> dict:
+    """Run the release-facing SPS recovery smoke on one held-out boxnet problem."""
+    _setup_paths()
+    _require_modal_preflight(
+        backend="vllm",
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+        artifact_dir="/tmp/proicl-one-problem-vllm",
+        model_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    )
+    return _smoke_proicl_one_problem_vllm_native_impl(
+        condition="single_prompt_power",
+        power_sampler="sps",
+        scoring_mode="forced_decode_v0",
+        max_new_tokens=max_new_tokens,
+        sps_top_k=sps_top_k,
+        sps_candidate_pool_size=sps_candidate_pool_size,
+        sps_rollouts_per_candidate=sps_rollouts_per_candidate,
+        sps_rollout_horizon=sps_rollout_horizon,
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+    )

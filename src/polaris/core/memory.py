@@ -83,6 +83,30 @@ def distill_strategy(trace: str) -> str:
     return distilled
 
 
+def distill_reasoning_gym_strategy(trace: str, descriptor: str) -> str:
+    """Task-aware distilled strategy snippets for Reasoning Gym memories."""
+    descriptor_l = descriptor.lower()
+    if "graph_color" in descriptor_l or "graph" in descriptor_l:
+        return (
+            "Represent the graph as adjacency constraints. Assign colors one node "
+            "at a time, and after every assignment check all already-colored "
+            "neighbors for conflicts before emitting the final mapping."
+        )
+    if "family_relationships" in descriptor_l or "family" in descriptor_l:
+        return (
+            "Build a directed family graph first. Preserve parent/child/spouse "
+            "direction, trace the requested relation through the graph, then "
+            "answer with only the requested name or relation."
+        )
+    if "boxnet" in descriptor_l or "box" in descriptor_l:
+        return (
+            "Serialize the grid state after each action. Before committing an "
+            "action, check agent position, collision legality, box movement, "
+            "color-target match, and the final target state."
+        )
+    return distill_strategy(trace)
+
+
 def _leaks_specifics(text: str) -> bool:
     """Leakage screen (PROPOSAL §8 distillation item 4).
 
@@ -126,7 +150,7 @@ class MemoryStore:
         """
         if not independent_check(candidate_trace):
             return None
-        strategy = distill_strategy(candidate_trace)
+        strategy = distill_reasoning_gym_strategy(candidate_trace, descriptor)
         if not strategy:
             return None
         entry = MemoryEntry(

@@ -27,6 +27,16 @@ DEFAULT_MAIN_TRACKS: tuple[str, ...] = (
     "math500",
     "reasoning_gym_boxnet",
     "reasoning_gym_graph_color",
+    "reasoning_gym_graph_color_n5",
+    "reasoning_gym_graph_color_n8",
+    "reasoning_gym_graph_color_n10",
+    "reasoning_gym_graph_color_n12",
+    "reasoning_gym_graph_color_n13",
+    "reasoning_gym_graph_color_n14",
+    "reasoning_gym_graph_color_n15",
+    "reasoning_gym_graph_color_n16",
+    "reasoning_gym_graph_color_n18",
+    "reasoning_gym_graph_color_n20",
     "reasoning_gym_family_relationships",
 )
 PRORL_CHECKPOINTS: tuple[str, ...] = (
@@ -42,6 +52,16 @@ TRACK_TOKEN_CAPS: dict[str, int] = {
     "gpqa_diamond": 2048,
     "reasoning_gym_boxnet": 8192,
     "reasoning_gym_graph_color": 8192,
+    "reasoning_gym_graph_color_n5": 8192,
+    "reasoning_gym_graph_color_n8": 8192,
+    "reasoning_gym_graph_color_n10": 8192,
+    "reasoning_gym_graph_color_n12": 8192,
+    "reasoning_gym_graph_color_n13": 8192,
+    "reasoning_gym_graph_color_n14": 8192,
+    "reasoning_gym_graph_color_n15": 8192,
+    "reasoning_gym_graph_color_n16": 8192,
+    "reasoning_gym_graph_color_n18": 8192,
+    "reasoning_gym_graph_color_n20": 8192,
     "reasoning_gym_family_relationships": 8192,
 }
 
@@ -231,19 +251,36 @@ def rws_math_direct_archive() -> FrozenArchive:
     )
 
 
-def reasoning_gym_direct_archive() -> FrozenArchive:
+def reasoning_gym_direct_archive(task: str = "generic") -> FrozenArchive:
+    if task == "family_relationships":
+        task_guidance = (
+            "Answer the kinship question with only the relationship word. No reasoning."
+        )
+    elif task == "graph_color":
+        task_guidance = (
+            "Solve the graph coloring task. The final tagged value must be a raw "
+            "JSON object mapping every vertex string to one allowed color."
+        )
+    elif task == "boxnet":
+        task_guidance = (
+            "Solve the box-moving planning task. The final tagged value must be a "
+            "raw JSON list of action dictionaries and contain no prose."
+        )
+    else:
+        task_guidance = (
+            "Solve the verifier-scored task and return exactly the value requested "
+            "by the task."
+        )
     return FrozenArchive(
         entries=(
             PromptEntry(
                 id="direct",
                 prefix=(
-                    "Solve the following task. Reason if needed, then put only the final "
-                    "answer inside <answer>...</answer>. For JSON tasks, the content inside "
-                    "the answer tag must be valid JSON and contain no prose.\n\nTask:\n"
+                    f"{task_guidance}\n\nTask:\n"
                 ),
                 suffix=(
-                    "\n\nReturn only the required final value inside <answer>...</answer>; "
-                    "do not put reasoning inside the answer tag."
+                    "\n\nReturn only the final value. Do not include a placeholder, "
+                    "example answer, or reasoning in the final response."
                 ),
                 descriptor_hint="reasoning_gym_direct_answer_tag",
             ),
@@ -253,16 +290,16 @@ def reasoning_gym_direct_archive() -> FrozenArchive:
 
 def reasoning_gym_seed_archive() -> FrozenArchive:
     base_suffix = (
-        "\n\nReturn only the required final value inside <answer>...</answer>; "
-        "do not put reasoning inside the answer tag."
+        "\n\nReturn only the final value. Do not include a placeholder, example "
+        "answer, or reasoning in the final response."
     )
     entries = (
         PromptEntry(
             id="direct",
             prefix=(
                 "Solve the following task. Reason if needed, then put only the final "
-                "answer inside <answer>...</answer>. For JSON tasks, the content inside "
-                "the answer tag must be valid JSON and contain no prose.\n\nTask:\n"
+                "answer in the final response. For JSON tasks, the final response must "
+                "be valid JSON and contain no prose.\n\nTask:\n"
             ),
             suffix=base_suffix,
             descriptor_hint="reasoning_gym_direct_answer_tag",
@@ -272,7 +309,8 @@ def reasoning_gym_seed_archive() -> FrozenArchive:
             prefix=(
                 "You are solving a verifier-scored reasoning task. Build the solution "
                 "carefully, check it against the task rules, and put the final answer "
-                "inside <answer>...</answer>. JSON answers must be raw valid JSON.\n\nTask:\n"
+                "in XML tags named answer. JSON answers must be raw valid JSON inside "
+                "the tags.\n\nTask:\n"
             ),
             suffix=base_suffix,
             descriptor_hint="reasoning_gym_rule_checked",
@@ -281,8 +319,8 @@ def reasoning_gym_seed_archive() -> FrozenArchive:
             id="format_strict",
             prefix=(
                 "Solve the task. Keep all reasoning outside the final answer. The text "
-                "between <answer> and </answer> must contain exactly the value that the "
-                "programmatic grader should parse.\n\nTask:\n"
+                "inside the final answer-tag block must contain exactly the value that "
+                "the programmatic grader should parse.\n\nTask:\n"
             ),
             suffix=base_suffix,
             descriptor_hint="reasoning_gym_format_strict",
@@ -302,6 +340,12 @@ def reasoning_gym_seed_archive() -> FrozenArchive:
 
 
 def direct_archive_kind_for_track(track: str) -> str:
+    if track == "reasoning_gym_family_relationships":
+        return "reasoning_gym_family_direct"
+    if track.startswith("reasoning_gym_graph_color"):
+        return "reasoning_gym_graph_color_direct"
+    if track == "reasoning_gym_boxnet":
+        return "reasoning_gym_boxnet_direct"
     return "reasoning_gym_direct" if track.startswith("reasoning_gym_") else "direct"
 
 
@@ -315,6 +359,15 @@ def write_archive(path: Path, *, kind: str) -> None:
         payload: Any = archive.to_jsonable()
     elif kind == "reasoning_gym_direct":
         archive = reasoning_gym_direct_archive()
+        payload = archive.to_jsonable()
+    elif kind == "reasoning_gym_family_direct":
+        archive = reasoning_gym_direct_archive("family_relationships")
+        payload = archive.to_jsonable()
+    elif kind == "reasoning_gym_graph_color_direct":
+        archive = reasoning_gym_direct_archive("graph_color")
+        payload = archive.to_jsonable()
+    elif kind == "reasoning_gym_boxnet_direct":
+        archive = reasoning_gym_direct_archive("boxnet")
         payload = archive.to_jsonable()
     elif kind == "reasoning_gym_seed_archive":
         archive = reasoning_gym_seed_archive()
@@ -696,7 +749,7 @@ def cell_command(
         "--polaris-source-hash",
         "filesystem-cloudrift-prorl-recovery",
         "--preregistration-anchor",
-        "docs/PRORL_RECOVERY_AUDIT.md",
+        "TODO.PROICL.md#proicl-fast-weight-recovery-audit",
         "--out",
         cell.out_dir,
         "--backend",

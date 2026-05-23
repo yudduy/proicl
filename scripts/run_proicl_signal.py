@@ -1,7 +1,7 @@
-"""Run the ProICL 20-problem/B=8 overnight signal experiment.
+"""Run the ProICL sustained-regime signal experiment.
 
 This is the executable ProICL harness: it builds prompt archives, runs the
-six operational conditions, skips completed cells on resume, and aggregates
+complete operational ladder, skips completed cells on resume, and aggregates
 the decomposition. It defaults to the HF vendored-RWS backend for MCMC
 faithfulness; vLLM is available only as an explicitly selected calibrated path.
 """
@@ -21,19 +21,62 @@ SRC_ROOT = REPO_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
+DEFAULT_SIGNAL_TRACKS: tuple[str, ...] = (
+    "reasoning_gym_family_relationships",
+    "reasoning_gym_graph_color_n5",
+    "reasoning_gym_graph_color_n8",
+    "reasoning_gym_graph_color_n10",
+    "reasoning_gym_graph_color_n13",
+    "reasoning_gym_graph_color_n15",
+    "reasoning_gym_graph_color_n18",
+    "reasoning_gym_graph_color_n20",
+    "reasoning_gym_boxnet",
+)
+
+DEFAULT_SIGNAL_CONDITIONS: tuple[str, ...] = (
+    "base_greedy",
+    "bon_temp1",
+    "mcmc_only",
+    "mixed_alpha_mcmc",
+    "fork_search",
+    "gepa_only",
+    "gepa_mcmc",
+    "gepa_mcmc_repair",
+    "gepa_mcmc_fork_repair",
+    "gepa_mcmc_fork_repair_memory",
+    "gepa_mcmc_memory",
+    "prorl_v2_greedy",
+)
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path("runs/proicl_overnight_signal"))
     parser.add_argument(
+        "--standard-run-root",
+        action="store_true",
+        help="Treat --root as a series directory and create a standardized run-id subdirectory.",
+    )
+    parser.add_argument(
+        "--run-tag",
+        default=None,
+        help="Optional short tag included in standardized run IDs.",
+    )
+    parser.add_argument(
         "--tracks",
         nargs="+",
-        default=[
-            "reasoning_gym_boxnet",
-            "reasoning_gym_graph_color",
-            "reasoning_gym_family_relationships",
-        ],
+        default=list(DEFAULT_SIGNAL_TRACKS),
     )
+    parser.add_argument("--conditions", nargs="+", default=list(DEFAULT_SIGNAL_CONDITIONS))
+    parser.add_argument(
+        "--archive-scope",
+        choices=["transductive_support", "within_family", "cross_family_curriculum"],
+        default="within_family",
+    )
+    parser.add_argument("--archive-train-tracks", nargs="+", default=None)
+    parser.add_argument("--archive-heldout-tracks", nargs="+", default=None)
+    parser.add_argument("--enable-repair", action="store_true")
+    parser.add_argument("--enable-fork-search", action="store_true")
     parser.add_argument("--eval-split", type=int, nargs=2, default=(20, 40))
     parser.add_argument("--gepa-dev-split", type=int, nargs=2, default=(0, 6))
     parser.add_argument("--rollout-budget", type=int, default=8)
@@ -42,6 +85,28 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--mcmc-steps", type=int, default=None)
     parser.add_argument("--mcmc-block-num", type=int, default=None)
+    parser.add_argument(
+        "--power-block-num",
+        type=int,
+        default=None,
+        help="Public alias for the number of power-sampling blocks.",
+    )
+    parser.add_argument(
+        "--sps-block-num",
+        type=int,
+        default=None,
+        help="SPS-facing alias for --power-block-num.",
+    )
+    parser.add_argument(
+        "--power-sampler",
+        choices=["mcmc", "sps"],
+        default="mcmc",
+        help="Use RWS/MH MCMC or Scalable Power Sampling for alpha>1 samples.",
+    )
+    parser.add_argument("--sps-top-k", type=int, default=8)
+    parser.add_argument("--sps-candidate-pool-size", type=int, default=8)
+    parser.add_argument("--sps-rollouts-per-candidate", type=int, default=8)
+    parser.add_argument("--sps-rollout-horizon", type=int, default=None)
     parser.add_argument("--num-shards", type=int, default=8)
     parser.add_argument("--memory-num-shards", type=int, default=1)
     parser.add_argument("--gpus", nargs="+", default=None)
@@ -50,6 +115,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--vllm-model-impl", default="transformers")
     parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.85)
     parser.add_argument("--vllm-max-model-len", type=int, default=None)
+    parser.add_argument(
+        "--no-vllm-prefix-caching",
+        action="store_true",
+        help="Disable vLLM prefix caching for V100/XFormers runs that fail prefix-prefill.",
+    )
     parser.add_argument(
         "--vllm-scoring-mode",
         choices=["forced_decode_v0", "native_segment"],
@@ -61,6 +131,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--cost-cap-dollars", type=float, default=4.0)
     parser.add_argument("--estimated-dollar-cost-per-cell", type=float, default=0.25)
     parser.add_argument("--estimated-wall-clock-seconds-per-cell", type=float, default=7200)
+    parser.add_argument("--reflection-provider", choices=["xai", "local-hf"], default="local-hf")
+    parser.add_argument("--reflection-model-id", default="Qwen/Qwen2.5-7B-Instruct")
     parser.add_argument("--xai-reflection-cap-dollars", type=float, default=2.0)
     parser.add_argument("--env-file", type=Path, default=REPO_ROOT / ".env")
     parser.add_argument("--local-files-only", action="store_true")
@@ -86,6 +158,22 @@ def _parse_args() -> argparse.Namespace:
         help="Do not aggregate after this worker finishes. Use for partition workers.",
     )
     return parser.parse_args()
+
+
+def _resolve_power_block_num(args: argparse.Namespace) -> int | None:
+    supplied = [
+        value
+        for value in (args.mcmc_block_num, args.power_block_num, args.sps_block_num)
+        if value is not None
+    ]
+    if not supplied:
+        return None
+    if len(set(supplied)) != 1:
+        raise SystemExit(
+            "--mcmc-block-num, --power-block-num, and --sps-block-num are aliases; "
+            "provide at most one value or use the same value for each."
+        )
+    return supplied[0]
 
 
 def _run(cmd: list[str], *, env: dict[str, str] | None = None, stdout: Path | None = None, stderr: Path | None = None) -> None:
@@ -118,8 +206,9 @@ def _setup_env(args: argparse.Namespace) -> dict[str, str]:
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env.setdefault("TOKENIZERS_PARALLELISM", "false")
     env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    env["XAI_REFLECTION_INITIAL_CAP_DOLLARS"] = str(args.xai_reflection_cap_dollars)
-    env["XAI_REFLECTION_HARD_CAP_DOLLARS"] = str(args.xai_reflection_cap_dollars)
+    if args.reflection_provider == "xai":
+        env["XAI_REFLECTION_INITIAL_CAP_DOLLARS"] = str(args.xai_reflection_cap_dollars)
+        env["XAI_REFLECTION_HARD_CAP_DOLLARS"] = str(args.xai_reflection_cap_dollars)
     env.setdefault("POLARIS_RWS_COMMIT", vendored_commit(REPO_ROOT, "upstream/reasoning-with-sampling"))
     env.setdefault("POLARIS_GEPA_COMMIT", vendored_commit(REPO_ROOT, "upstream/gepa"))
     env.setdefault("POLARIS_EVALPLUS_COMMIT", vendored_commit(REPO_ROOT, "upstream/evalplus"))
@@ -203,8 +292,12 @@ def _archive_is_live(
     *,
     archive_size: int,
     tracks: list[str],
+    archive_scope: str = "within_family",
+    heldout_tracks: list[str] | None = None,
     dev_split: tuple[int, int],
     max_metric_calls: int,
+    reflection_provider: str = "local-hf",
+    reflection_model_id: str | None = None,
 ) -> bool:
     manifest = path / "archive_build_manifest.json"
     archive = path / "archive.json"
@@ -213,16 +306,31 @@ def _archive_is_live(
     payload = json.loads(manifest.read_text(encoding="utf-8"))
     if payload.get("tracks") != list(tracks):
         return False
+    if payload.get("archive_scope") != archive_scope:
+        return False
+    if heldout_tracks is not None and payload.get("heldout_tracks") != list(heldout_tracks):
+        return False
     if payload.get("dev_split") != list(dev_split):
         return False
     if int(payload.get("gepa", {}).get("max_metric_calls", -1)) != int(max_metric_calls):
         return False
     if payload.get("gepa", {}).get("dry_run", True):
         return False
-    if payload.get("reflection", {}).get("provider") != "xai":
+    expected_provider = "local_hf" if reflection_provider == "local-hf" else reflection_provider
+    reflection = payload.get("reflection", {})
+    if reflection.get("provider") != expected_provider:
         return False
+    if expected_provider == "local_hf" and reflection_model_id:
+        if reflection.get("config", {}).get("model_id") != reflection_model_id:
+            return False
     archive_payload = json.loads(archive.read_text(encoding="utf-8"))
     return len(archive_payload.get("entries", [])) == archive_size
+
+
+def _archive_scope_dir(args: argparse.Namespace, tracks: list[str]) -> str:
+    from polaris.proicl.protocol import ArchiveScope, archive_scope_id
+
+    return archive_scope_id(ArchiveScope(args.archive_scope), tuple(tracks))
 
 
 def _build_direct_archives(root: Path, tracks: list[str]) -> None:
@@ -253,14 +361,19 @@ def _build_gepa_archive(
     cuda_visible_devices: str | None = None,
     force: bool = False,
 ) -> None:
-    out = root / "archives" / "proicl_cross_task_gepa"
+    heldout_tracks = list(args.archive_heldout_tracks or args.tracks)
+    out = root / "archives" / _archive_scope_dir(args, tracks)
     if (
         _archive_is_live(
             out,
             archive_size=archive_size,
             tracks=tracks,
+            archive_scope=args.archive_scope,
+            heldout_tracks=heldout_tracks,
             dev_split=dev_split,
             max_metric_calls=max_metric_calls,
+            reflection_provider=args.reflection_provider,
+            reflection_model_id=args.reflection_model_id,
         )
         and not force
     ):
@@ -297,6 +410,10 @@ def _gepa_archive_command(
     reflection_max_new_tokens: int,
     cuda_visible_devices: str | None,
 ) -> list[str]:
+    reflection_provider = getattr(args, "reflection_provider", "local-hf")
+    reflection_model_id = getattr(args, "reflection_model_id", "Qwen/Qwen2.5-7B-Instruct")
+    archive_scope = getattr(args, "archive_scope", "within_family")
+    heldout_tracks = list(getattr(args, "archive_heldout_tracks", None) or getattr(args, "tracks", tracks))
     cmd = [
             sys.executable,
             "scripts/run_proicl.py",
@@ -305,6 +422,10 @@ def _gepa_archive_command(
             str(out),
             "--tracks",
             *tracks,
+            "--archive-scope",
+            archive_scope,
+            "--heldout-tracks",
+            *heldout_tracks,
             "--dev-split",
             str(dev_split[0]),
             str(dev_split[1]),
@@ -313,7 +434,7 @@ def _gepa_archive_command(
             "--max-metric-calls",
             str(max_metric_calls),
             "--reflection-provider",
-            "xai",
+            reflection_provider,
             "--env-file",
             str(args.env_file),
             "--live-gepa",
@@ -322,6 +443,8 @@ def _gepa_archive_command(
             "--reflection-max-new-tokens",
             str(reflection_max_new_tokens),
         ]
+    if reflection_provider == "local-hf":
+        cmd.extend(["--reflection-model-id", reflection_model_id])
     if args.backend == "vllm":
         cmd.extend(
             [
@@ -337,6 +460,8 @@ def _gepa_archive_command(
                 args.vllm_scoring_mode,
             ]
         )
+        if getattr(args, "no_vllm_prefix_caching", False):
+            cmd.append("--no-vllm-prefix-caching")
         if args.vllm_max_model_len is not None:
             cmd.extend(["--vllm-max-model-len", str(args.vllm_max_model_len)])
         if args.vllm_parity_artifact is not None:
@@ -362,14 +487,19 @@ def _start_gepa_archive(
     cuda_visible_devices: str,
     force: bool = False,
 ) -> subprocess.Popen | None:
-    out = root / "archives" / "proicl_cross_task_gepa"
+    heldout_tracks = list(args.archive_heldout_tracks or args.tracks)
+    out = root / "archives" / _archive_scope_dir(args, tracks)
     if (
         _archive_is_live(
             out,
             archive_size=archive_size,
             tracks=tracks,
+            archive_scope=args.archive_scope,
+            heldout_tracks=heldout_tracks,
             dev_split=dev_split,
             max_metric_calls=max_metric_calls,
+            reflection_provider=args.reflection_provider,
+            reflection_model_id=args.reflection_model_id,
         )
         and not force
     ):
@@ -424,6 +554,10 @@ def _run_cells_for_root(
         rollout_budget=rollout_budget,
         num_shards=num_shards,
         memory_num_shards=memory_num_shards,
+        archive_scope=args.archive_scope,
+        archive_train_tracks=args.archive_train_tracks or tracks,
+        archive_heldout_tracks=args.archive_heldout_tracks or tracks,
+        conditions=args.conditions,
     )
     write_json(root / "proicl_signal_plan.json", [cell.to_jsonable() for cell in cells])
     append_event(events, "run_cells_start", root=str(root), tracks=tracks, split=list(split))
@@ -443,8 +577,13 @@ def _run_cells_for_root(
             run_kind=args.run_kind,
             run_stage=run_stage,
             max_new_tokens=args.max_new_tokens,
+            power_sampler=args.power_sampler,
             mcmc_steps=args.mcmc_steps,
             mcmc_block_num=args.mcmc_block_num,
+            sps_top_k=args.sps_top_k,
+            sps_candidate_pool_size=args.sps_candidate_pool_size,
+            sps_rollouts_per_candidate=args.sps_rollouts_per_candidate,
+            sps_rollout_horizon=args.sps_rollout_horizon,
             vllm_dtype=args.vllm_dtype,
             vllm_model_impl=args.vllm_model_impl,
             vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
@@ -453,6 +592,7 @@ def _run_cells_for_root(
             vllm_parity_artifact=str(args.vllm_parity_artifact)
             if args.vllm_parity_artifact is not None
             else None,
+            vllm_enable_prefix_caching=not args.no_vllm_prefix_caching,
         )
         report = aggregate(root=root, tracks=tracks, out_dir=root / "analysis")
         write_json(root / "analysis" / "aggregate_stdout.json", report)
@@ -492,8 +632,13 @@ def _run_cell_list(
             run_kind=args.run_kind,
             run_stage=run_stage,
             max_new_tokens=args.max_new_tokens,
+            power_sampler=args.power_sampler,
             mcmc_steps=args.mcmc_steps,
             mcmc_block_num=args.mcmc_block_num,
+            sps_top_k=args.sps_top_k,
+            sps_candidate_pool_size=args.sps_candidate_pool_size,
+            sps_rollouts_per_candidate=args.sps_rollouts_per_candidate,
+            sps_rollout_horizon=args.sps_rollout_horizon,
             vllm_dtype=args.vllm_dtype,
             vllm_model_impl=args.vllm_model_impl,
             vllm_gpu_memory_utilization=args.vllm_gpu_memory_utilization,
@@ -502,6 +647,7 @@ def _run_cell_list(
             vllm_parity_artifact=str(args.vllm_parity_artifact)
             if args.vllm_parity_artifact is not None
             else None,
+            vllm_enable_prefix_caching=not args.no_vllm_prefix_caching,
         )
         if aggregate_after:
             report = aggregate(root=root, tracks=tracks, out_dir=root / "analysis")
@@ -523,6 +669,9 @@ def _partition_cells(cells: list[Any], *, stride: int, offset: int) -> list[Any]
 
 def main() -> None:
     args = _parse_args()
+    args.mcmc_block_num = _resolve_power_block_num(args)
+    if args.power_sampler == "sps" and args.backend != "vllm":
+        raise SystemExit("--power-sampler sps currently requires --backend vllm")
     if args.backend == "vllm":
         from polaris.infra.vllm_calibration import (
             CalibrationArtifactError,
@@ -537,6 +686,46 @@ def main() -> None:
             )
         except CalibrationArtifactError as exc:
             raise SystemExit(f"vLLM calibration gate failed: {exc}") from exc
+    if args.standard_run_root:
+        from polaris.proicl.naming import (
+            make_proicl_run_identity,
+            standard_run_root,
+            write_run_index,
+        )
+
+        identity = make_proicl_run_identity(
+            run_stage=args.run_stage,
+            tracks=args.tracks,
+            archive_scope=args.archive_scope,
+            backend=args.backend,
+            tag=args.run_tag,
+        )
+        args.root = standard_run_root(args.root, identity)
+        write_run_index(
+            args.root / "run_index.json",
+            identity=identity,
+            tracks=args.tracks,
+            conditions=args.conditions,
+            split=tuple(args.eval_split),
+            rollout_budget=args.rollout_budget,
+            archive_size=args.archive_size,
+            max_metric_calls=args.max_metric_calls,
+            max_new_tokens=args.max_new_tokens,
+            mcmc_steps=args.mcmc_steps,
+            mcmc_block_num=args.mcmc_block_num,
+            power_sampler=args.power_sampler,
+            sps_top_k=args.sps_top_k,
+            sps_candidate_pool_size=args.sps_candidate_pool_size,
+            sps_rollouts_per_candidate=args.sps_rollouts_per_candidate,
+            sps_rollout_horizon=args.sps_rollout_horizon,
+            num_shards=args.num_shards,
+            memory_num_shards=args.memory_num_shards,
+            reflection_provider=args.reflection_provider,
+            reflection_model_id=args.reflection_model_id,
+            run_kind=args.run_kind,
+            cost_cap_dollars=args.cost_cap_dollars,
+            notes="Created by scripts/run_proicl_signal.py --standard-run-root.",
+        )
     args.root = args.root.resolve()
     args.root.mkdir(parents=True, exist_ok=True)
     env = _setup_env(args)
@@ -552,7 +741,7 @@ def main() -> None:
             args=args,
             env=env,
             root=smoke_root,
-            tracks=args.tracks,
+            tracks=args.archive_train_tracks or args.tracks,
             dev_split=(0, 1),
             archive_size=2,
             max_metric_calls=4,
@@ -588,6 +777,10 @@ def main() -> None:
         rollout_budget=args.rollout_budget,
         num_shards=args.num_shards,
         memory_num_shards=args.memory_num_shards,
+        archive_scope=args.archive_scope,
+        archive_train_tracks=args.archive_train_tracks or args.tracks,
+        archive_heldout_tracks=args.archive_heldout_tracks or args.tracks,
+        conditions=args.conditions,
     )
     partitioned_all_cells = _partition_cells(
         all_cells,
@@ -616,7 +809,7 @@ def main() -> None:
         args=args,
         env=env,
         root=full_root,
-        tracks=args.tracks,
+        tracks=args.archive_train_tracks or args.tracks,
         dev_split=tuple(args.gepa_dev_split),
         archive_size=args.archive_size,
         max_metric_calls=args.max_metric_calls,

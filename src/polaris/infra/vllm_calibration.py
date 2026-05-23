@@ -336,6 +336,12 @@ def _calibration_model_id(payload: dict[str, Any]) -> str | None:
         runtime = chain.get("runtime_metadata")
         if isinstance(runtime, dict) and runtime.get("model_id") is not None:
             return str(runtime["model_id"])
+        vllm_runtime = chain.get("vllm_runtime_metadata")
+        if isinstance(vllm_runtime, dict) and vllm_runtime.get("model_id") is not None:
+            return str(vllm_runtime["model_id"])
+        hf_runtime = chain.get("hf_runtime_metadata")
+        if isinstance(hf_runtime, dict) and hf_runtime.get("model_id") is not None:
+            return str(hf_runtime["model_id"])
         tokenizer = chain.get("tokenizer_parity")
         if isinstance(tokenizer, dict) and tokenizer.get("model_id") is not None:
             return str(tokenizer["model_id"])

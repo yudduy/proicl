@@ -211,9 +211,46 @@ def test_validate_vllm_calibration_artifact_checks_expected_model_id(tmp_path):
         )
 
 
+def test_validate_vllm_calibration_artifact_accepts_new_runtime_metadata_layout(tmp_path):
+    payload = {
+        "passed": True,
+        "score_parity": {"passed": True, "tolerance": 1e-3},
+        "mh_replay_parity": {"passed": True},
+        "full_chain_replay": {
+            "passed": True,
+            "vllm_runtime_metadata": {
+                "model_id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+            },
+            "hf_runtime_metadata": {
+                "model_id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+            },
+            "tokenizer_parity": {"passed": True},
+        },
+    }
+    path = tmp_path / "calibration_summary.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = validate_vllm_calibration_artifact(
+        path,
+        expected_model_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    )
+
+    assert loaded["passed"] is True
+
+
 def test_vllm_calibration_required_only_for_power_conditions():
     assert _RUN_CONDITION._condition_requires_vllm_calibration("single_prompt_power")
+    assert _RUN_CONDITION._condition_requires_vllm_calibration("mixed_alpha_mcmc")
     assert _RUN_CONDITION._condition_requires_vllm_calibration("proicl_gepa_mcmc")
+    assert _RUN_CONDITION._condition_requires_vllm_calibration(
+        "proicl_gepa_mcmc_repair"
+    )
+    assert _RUN_CONDITION._condition_requires_vllm_calibration(
+        "proicl_gepa_mcmc_fork_repair"
+    )
+    assert _RUN_CONDITION._condition_requires_vllm_calibration(
+        "proicl_gepa_mcmc_fork_repair_memory"
+    )
     assert _RUN_CONDITION._condition_requires_vllm_calibration(
         "proicl_gepa_mcmc_memory"
     )

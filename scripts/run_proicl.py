@@ -25,6 +25,14 @@ def _parse_args() -> argparse.Namespace:
     plan.add_argument("--rollout-budget", type=int, default=128)
     plan.add_argument("--num-shards", type=int, default=4)
     plan.add_argument("--seed", type=int, default=17)
+    plan.add_argument(
+        "--archive-scope",
+        choices=["transductive_support", "within_family", "cross_family_curriculum"],
+        default="within_family",
+    )
+    plan.add_argument("--archive-train-tracks", nargs="+", default=None)
+    plan.add_argument("--archive-heldout-tracks", nargs="+", default=None)
+    plan.add_argument("--conditions", nargs="+", default=None)
     plan.add_argument("--out", type=Path, required=True)
 
     direct = sub.add_parser("write-direct-archives")
@@ -37,11 +45,23 @@ def _parse_args() -> argparse.Namespace:
         "--tracks",
         nargs="+",
         default=[
-            "reasoning_gym_boxnet",
-            "reasoning_gym_graph_color",
             "reasoning_gym_family_relationships",
+            "reasoning_gym_graph_color_n5",
+            "reasoning_gym_graph_color_n8",
+            "reasoning_gym_graph_color_n10",
+            "reasoning_gym_graph_color_n13",
+            "reasoning_gym_graph_color_n15",
+            "reasoning_gym_graph_color_n18",
+            "reasoning_gym_graph_color_n20",
+            "reasoning_gym_boxnet",
         ],
     )
+    archive.add_argument(
+        "--archive-scope",
+        choices=["transductive_support", "within_family", "cross_family_curriculum"],
+        default="within_family",
+    )
+    archive.add_argument("--heldout-tracks", nargs="+", default=None)
     archive.add_argument("--dev-split", type=int, nargs=2, default=(0, 100))
     archive.add_argument("--archive-size", type=int, default=16)
     archive.add_argument("--max-metric-calls", type=int, default=1000)
@@ -59,6 +79,7 @@ def _parse_args() -> argparse.Namespace:
     archive.add_argument("--vllm-model-impl", default="transformers")
     archive.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.85)
     archive.add_argument("--vllm-max-model-len", type=int, default=None)
+    archive.add_argument("--no-vllm-prefix-caching", action="store_true")
     archive.add_argument(
         "--vllm-scoring-mode",
         choices=["forced_decode_v0", "native_segment"],
@@ -100,6 +121,10 @@ def _cmd_plan(args: argparse.Namespace) -> None:
         rollout_budget=args.rollout_budget,
         num_shards=args.num_shards,
         seed=args.seed,
+        archive_scope=args.archive_scope,
+        archive_train_tracks=args.archive_train_tracks,
+        archive_heldout_tracks=args.archive_heldout_tracks,
+        conditions=tuple(args.conditions) if args.conditions else None,
     )
     write_proicl_run_graph(args.out, graph)
     print(json.dumps({"out": str(args.out), "cells": len(graph["cells"])}, sort_keys=True))
@@ -160,6 +185,7 @@ def _cmd_build_archive(args: argparse.Namespace) -> None:
                 max_model_len=args.vllm_max_model_len,
                 local_files_only=args.local_files_only,
                 scoring_mode=args.vllm_scoring_mode,
+                enable_prefix_caching=not args.no_vllm_prefix_caching,
                 parity_artifact_path=args.vllm_parity_artifact,
             )
         else:
@@ -203,6 +229,8 @@ def _cmd_build_archive(args: argparse.Namespace) -> None:
     manifest = build_cross_task_curriculum_archive(
         out_dir=args.out,
         tracks=tuple(args.tracks),
+        archive_scope=args.archive_scope,
+        heldout_tracks=tuple(args.heldout_tracks or args.tracks),
         dev_split=(args.dev_split[0], args.dev_split[1]),
         archive_size=args.archive_size,
         dry_run=args.dry_run,

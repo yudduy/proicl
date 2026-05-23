@@ -11,6 +11,7 @@ dependencies = [
   "pandas",
   "pyarrow",
   "pylatexenc",
+  "reasoning-gym==0.1.25",
   "scipy",
   "sympy",
   "torch",

@@ -312,6 +312,7 @@ def reflection_manifest(
     if config is not None:
         payload["config"] = config.to_manifest()
     serialized = json.dumps(payload)
-    if config and config.api_key and config.api_key in serialized:
+    api_key = getattr(config, "api_key", None)
+    if api_key and api_key in serialized:
         raise RuntimeError("secret leaked into reflection manifest")
     return payload

@@ -12,6 +12,7 @@ from typing import Any, Callable, Protocol, Sequence
 from polaris.config import MAX_NEW_TOKENS, MCMC_BLOCK_NUM, MCMC_STEPS, MODEL_ID
 from polaris.core.archive import FrozenArchive
 from polaris.core.inference import Candidate, polaris_inference
+from polaris.core.fork_search import ForkSearchConfig, run_entropy_gated_fork_search
 from polaris.core.memory import (
     MAX_RETRIEVED_MEMORY_ENTRIES,
     MAX_RETRIEVED_MEMORY_TOKENS,
@@ -24,6 +25,7 @@ from polaris.core.mixed_alpha import (
     AlphaSchedule,
 )
 from polaris.core.persistent_memory import PersistentMemoryLedger
+from polaris.core.repair import RepairConfig, run_verifier_guided_repair
 from polaris.evals.datasets.math500 import MATH500_TEST_SLICE, Problem
 from polaris.evals.verifiers.math import VERIFIER_ID, score_math
 from polaris.io.artifacts import append_jsonl, write_json
@@ -43,6 +45,11 @@ CONDITIONS: tuple[str, ...] = (
     "polaris_full_verified_memory",
     "proicl_gepa_mcmc",
     "proicl_gepa_mcmc_memory",
+    "mixed_alpha_mcmc",
+    "fork_search",
+    "proicl_gepa_mcmc_repair",
+    "proicl_gepa_mcmc_fork_repair",
+    "proicl_gepa_mcmc_fork_repair_memory",
     "dynamic_cheatsheet",
     "ace",
     "gepa_only",
@@ -63,6 +70,20 @@ class _SamplerLike(Protocol):
     def generate_low_temp(
         self, prompt_text: str, *, temperature: float, max_new_tokens: int
     ) -> Any: ...
+    def generate_sps_power_batch(
+        self,
+        prompt_texts: list[str],
+        *,
+        temperature: float,
+        max_new_tokens: int,
+        block_num: int = ...,
+        top_k: int = ...,
+        candidate_pool_size: int = ...,
+        rollouts_per_candidate: int = ...,
+        rollout_horizon: int | None = ...,
+        seed_base: int | None = ...,
+        seed_offsets: list[int] | None = ...,
+    ) -> list[Any]: ...
 
 
 _ALPHA_1_ONLY = AlphaSchedule(policy_id="bon_temp1", alphas=(1.0,))
@@ -87,6 +108,8 @@ def _select_archive_subset(
         "greedy",
         "bon_temp1",
         "single_prompt_power",
+        "mixed_alpha_mcmc",
+        "fork_search",
         "dynamic_cheatsheet",
         "ace",
     ):
@@ -107,6 +130,9 @@ def _select_archive_subset(
         "polaris_full_verified_memory",
         "proicl_gepa_mcmc",
         "proicl_gepa_mcmc_memory",
+        "proicl_gepa_mcmc_repair",
+        "proicl_gepa_mcmc_fork_repair",
+        "proicl_gepa_mcmc_fork_repair_memory",
         "bon_temp1_archive",
         "gepa_only",
     ):
@@ -115,11 +141,20 @@ def _select_archive_subset(
 
 
 def _select_schedule(condition: str) -> AlphaSchedule:
-    if condition in ("full_archive_mixed", "polaris_full_verified_memory"):
+    if condition in (
+        "full_archive_mixed",
+        "polaris_full_verified_memory",
+        "proicl_gepa_mcmc",
+        "proicl_gepa_mcmc_memory",
+        "mixed_alpha_mcmc",
+        "proicl_gepa_mcmc_repair",
+        "proicl_gepa_mcmc_fork_repair",
+        "proicl_gepa_mcmc_fork_repair_memory",
+    ):
         return MIXED_ALPHA_4_1
     if condition == "full_archive_decaying":
         return DECAYING_ALPHA_4_TO_1
-    if condition in ("bon_temp1", "bon_temp1_archive", "dynamic_cheatsheet", "ace", "gepa_only"):
+    if condition in ("bon_temp1", "bon_temp1_archive", "dynamic_cheatsheet", "ace", "gepa_only", "fork_search"):
         return _ALPHA_1_ONLY
     return FIXED_ALPHA_4
 
@@ -326,8 +361,12 @@ def _candidate_row(
     row["problem_id"] = problem.problem_id
     row["source"] = getattr(problem, "source", None)
     row["candidate_id"] = (
-        f"{problem.problem_id}:{candidate.prompt_id}:"
-        f"{candidate.sample_index}:alpha={candidate.alpha:g}"
+        f"{problem.problem_id}:{candidate.search_trace_id}"
+        if candidate.search_trace_id
+        else (
+            f"{problem.problem_id}:{candidate.prompt_id}:"
+            f"{candidate.sample_index}:alpha={candidate.alpha:g}"
+        )
     )
     row["cache_key"] = _cache_key_payload(
         model_id=model_id,
@@ -370,6 +409,7 @@ def _memory_enabled(
     return (
         condition == "polaris_full_verified_memory"
         or condition == "proicl_gepa_mcmc_memory"
+        or condition == "proicl_gepa_mcmc_fork_repair_memory"
         or memory_store is not None
         or memory_store_path is not None
         or memory_mode != "off"
@@ -419,6 +459,11 @@ def _run_problem_batched(
     max_new_tokens: int,
     mcmc_steps: int,
     mcmc_block_num: int,
+    power_sampler: str,
+    sps_top_k: int,
+    sps_candidate_pool_size: int,
+    sps_rollouts_per_candidate: int,
+    sps_rollout_horizon: int | None,
     scorer: Callable[[str, str], dict],
     total_samples: int,
     trajectory_cache: TrajectoryCache | None,
@@ -497,15 +542,36 @@ def _run_problem_batched(
             )
 
     for temperature, power_jobs in sorted(power_jobs_by_temperature.items()):
-        gens = sampler.generate_power_batch(
-            [job.prompt_text for _, job in power_jobs],
-            temperature=temperature,
-            mcmc_steps=mcmc_steps,
-            max_new_tokens=max_new_tokens,
-            block_num=mcmc_block_num,
-            seed_base=seed,
-            seed_offsets=[job.stable_seed_offset for _, job in power_jobs],
-        )
+        if power_sampler == "sps":
+            sps_batch = getattr(sampler, "generate_sps_power_batch", None)
+            if not callable(sps_batch):
+                raise NotImplementedError(
+                    "power_sampler='sps' requires sampler.generate_sps_power_batch"
+                )
+            gens = sps_batch(
+                [job.prompt_text for _, job in power_jobs],
+                temperature=temperature,
+                max_new_tokens=max_new_tokens,
+                block_num=mcmc_block_num,
+                top_k=sps_top_k,
+                candidate_pool_size=sps_candidate_pool_size,
+                rollouts_per_candidate=sps_rollouts_per_candidate,
+                rollout_horizon=sps_rollout_horizon,
+                seed_base=seed,
+                seed_offsets=[job.stable_seed_offset for _, job in power_jobs],
+            )
+        elif power_sampler == "mcmc":
+            gens = sampler.generate_power_batch(
+                [job.prompt_text for _, job in power_jobs],
+                temperature=temperature,
+                mcmc_steps=mcmc_steps,
+                max_new_tokens=max_new_tokens,
+                block_num=mcmc_block_num,
+                seed_base=seed,
+                seed_offsets=[job.stable_seed_offset for _, job in power_jobs],
+            )
+        else:
+            raise ValueError(f"unknown power_sampler: {power_sampler!r}")
         for (pos, job), gen in zip(power_jobs, gens):
             candidates_by_pos[pos] = _candidate_from_generation(
                 job=job,
@@ -564,6 +630,8 @@ def run_condition(
     memory_mode: str = "off",
     admit_memory: bool = False,
     online_memory: bool = False,
+    enable_repair: bool = False,
+    enable_fork_search: bool = False,
     archive_build_id: str | None = None,
     memory_build_id: str | None = None,
     budget_override: int | None = None,
@@ -571,6 +639,11 @@ def run_condition(
     serving_backend_metadata: dict[str, Any] | None = None,
     mcmc_steps: int = MCMC_STEPS,
     mcmc_block_num: int = MCMC_BLOCK_NUM,
+    power_sampler: str = "mcmc",
+    sps_top_k: int = 8,
+    sps_candidate_pool_size: int = 8,
+    sps_rollouts_per_candidate: int = 8,
+    sps_rollout_horizon: int | None = None,
 ) -> dict[str, Any]:
     """Run one condition over `problems`; emit full production artifact bundle."""
     if condition not in CONDITIONS:
@@ -584,6 +657,16 @@ def run_condition(
         raise ValueError("mcmc_steps must be positive")
     if mcmc_block_num <= 0:
         raise ValueError("mcmc_block_num must be positive")
+    if power_sampler not in {"mcmc", "sps"}:
+        raise ValueError("power_sampler must be one of {'mcmc', 'sps'}")
+    if sps_top_k <= 0:
+        raise ValueError("sps_top_k must be positive")
+    if sps_candidate_pool_size <= 0:
+        raise ValueError("sps_candidate_pool_size must be positive")
+    if sps_rollouts_per_candidate < 0:
+        raise ValueError("sps_rollouts_per_candidate must be non-negative")
+    if sps_rollout_horizon is not None and sps_rollout_horizon <= 0:
+        raise ValueError("sps_rollout_horizon must be positive when set")
     out_dir.mkdir(parents=True, exist_ok=True)
 
     archive_subset = _select_archive_subset(archive, cell_fitness, condition)
@@ -593,7 +676,11 @@ def run_condition(
         memory_store_path=memory_store_path,
         memory_mode=memory_mode,
     )
-    if condition in ("polaris_full_verified_memory", "proicl_gepa_mcmc_memory") and memory_mode == "off":
+    if condition in (
+        "polaris_full_verified_memory",
+        "proicl_gepa_mcmc_memory",
+        "proicl_gepa_mcmc_fork_repair_memory",
+    ) and memory_mode == "off":
         memory_mode = "distilled_strategies"
     if memory_is_enabled:
         archive_subset = _archive_with_memory(archive_subset)
@@ -617,12 +704,29 @@ def run_condition(
     selected_path.touch(exist_ok=True)
 
     n_correct = 0
+    total_selected_score = 0.0
     total_wall = 0.0
     total_dollars = 0.0
     total_input_tokens = 0
     total_output_tokens = 0
     n_candidates = 0
     ledger = RolloutLedger()
+    repair_enabled = enable_repair or condition in {
+        "proicl_gepa_mcmc_repair",
+        "proicl_gepa_mcmc_fork_repair",
+        "proicl_gepa_mcmc_fork_repair_memory",
+    }
+    fork_enabled = enable_fork_search or condition in {
+        "fork_search",
+        "proicl_gepa_mcmc_fork_repair",
+        "proicl_gepa_mcmc_fork_repair_memory",
+    }
+    repair_traces_path = out_dir / "repair_traces.jsonl"
+    fork_traces_path = out_dir / "fork_traces.jsonl"
+    if repair_enabled:
+        append_jsonl(repair_traces_path, {"event": "repair_enabled", "condition": condition})
+    if fork_enabled:
+        append_jsonl(fork_traces_path, {"event": "fork_search_enabled", "condition": condition})
 
     for problem in problems:
         if condition == "greedy":
@@ -643,6 +747,11 @@ def run_condition(
                     max_new_tokens=max_new_tokens,
                     mcmc_steps=mcmc_steps,
                     mcmc_block_num=mcmc_block_num,
+                    power_sampler=power_sampler,
+                    sps_top_k=sps_top_k,
+                    sps_candidate_pool_size=sps_candidate_pool_size,
+                    sps_rollouts_per_candidate=sps_rollouts_per_candidate,
+                    sps_rollout_horizon=sps_rollout_horizon,
                     scorer=scorer,
                     total_samples=B,
                     trajectory_cache=trajectory_cache,
@@ -679,6 +788,7 @@ def run_condition(
                     ),
                     mcmc_steps=mcmc_steps,
                     mcmc_block_num=mcmc_block_num,
+                    power_sampler=power_sampler,
                 )
                 if memory_ledger is not None and memory_store is not None:
                     for c in candidates:
@@ -733,6 +843,65 @@ def run_condition(
                                 metadata={"condition": condition},
                             )
 
+        if fork_enabled:
+            fork_candidates: list[Candidate] = []
+            for entry in archive_subset.entries:
+                fork_candidates.extend(
+                    run_entropy_gated_fork_search(
+                        prompt_id=entry.id,
+                        sample_index_start=len(candidates) + len(fork_candidates),
+                        prompt_text=entry.compose(problem.prompt),
+                        sampler=sampler,
+                        scorer=scorer,
+                        reference=problem.answer,
+                        max_new_tokens=max_new_tokens,
+                        config=ForkSearchConfig(),
+                    )
+                )
+            for c in fork_candidates:
+                append_jsonl(
+                    fork_traces_path,
+                    {
+                        "problem_id": problem.problem_id,
+                        "prompt_id": c.prompt_id,
+                        "sample_index": c.sample_index,
+                        "fork_depth": c.fork_depth,
+                        "fork_entropy": c.fork_entropy,
+                        "fork_token": c.fork_token,
+                        "fork_probability": c.fork_probability,
+                        "passed": c.verifier_result.get("passed", False),
+                        "score": c.verifier_result.get("score", 0.0),
+                    },
+                )
+            candidates.extend(fork_candidates)
+
+        if repair_enabled:
+            repair_candidates: list[Candidate] = []
+            for c in list(candidates):
+                repair_candidates.extend(
+                    run_verifier_guided_repair(
+                        parent=c,
+                        sampler=sampler,
+                        scorer=scorer,
+                        reference=problem.answer,
+                        max_new_tokens=max_new_tokens,
+                        config=RepairConfig(),
+                    )
+                )
+            for c in repair_candidates:
+                append_jsonl(
+                    repair_traces_path,
+                    {
+                        "problem_id": problem.problem_id,
+                        "parent_candidate_id": c.parent_candidate_id,
+                        "repair_attempt": c.repair_attempt,
+                        "passed": c.verifier_result.get("passed", False),
+                        "score": c.verifier_result.get("score", 0.0),
+                        "failure_type": c.verifier_result.get("failure_type"),
+                    },
+                )
+            candidates.extend(repair_candidates)
+
         selection_metadata: dict[str, Any]
         if best_selector is not None:
             best, selection_metadata = best_selector(candidates)
@@ -768,6 +937,8 @@ def run_condition(
             n_candidates += 1
         ledger.charge_inference(condition, len(candidates))
 
+        selected_score = float(best.verifier_result.get("score", 0.0))
+        total_selected_score += selected_score
         if best.verifier_result.get("passed"):
             n_correct += 1
         selected_row = _candidate_row(
@@ -778,24 +949,33 @@ def run_condition(
             seed=seed,
         )
         selected_row["selection"] = selection_metadata
-        selected_row["selected_score"] = best.verifier_result.get("score", 0.0)
+        selected_row["selected_score"] = selected_score
         selected_row["selected_passed"] = best.verifier_result.get("passed", False)
         append_jsonl(selected_path, selected_row)
 
     accuracy = n_correct / len(problems) if problems else 0.0
+    mean_selected_score = total_selected_score / len(problems) if problems else 0.0
     metrics = {
         "track": track,
         "model_key": model_key,
         "run_stage": run_stage,
         "condition": condition,
         "accuracy": accuracy,
+        "mean_selected_score": mean_selected_score,
         "n_problems": len(problems),
         "n_candidates": n_candidates,
         "B_per_problem": B,
         "sampling_temperature": low_temp_temperature,
         "mcmc_steps": mcmc_steps,
         "mcmc_block_num": mcmc_block_num,
+        "power_sampler": power_sampler,
+        "sps_top_k": sps_top_k,
+        "sps_candidate_pool_size": sps_candidate_pool_size,
+        "sps_rollouts_per_candidate": sps_rollouts_per_candidate,
+        "sps_rollout_horizon": sps_rollout_horizon,
         "alpha_policy_id": schedule.policy_id,
+        "repair_enabled": repair_enabled,
+        "fork_search_enabled": fork_enabled,
         "selector_id": selector_id,
         "verifier_id": verifier_id,
         "backend": serving_backend_metadata.get("backend"),
@@ -844,11 +1024,18 @@ def run_condition(
             "memory_build_id": memory_build_id,
             "memory_mode": memory_mode if memory_is_enabled else "none",
             "alpha_policy": schedule.policy_id,
+            "repair_enabled": repair_enabled,
+            "fork_search_enabled": fork_enabled,
             "seed": seed,
             "budget": B,
             "sampling_temperature": low_temp_temperature,
             "mcmc_steps": mcmc_steps,
             "mcmc_block_num": mcmc_block_num,
+            "power_sampler": power_sampler,
+            "sps_top_k": sps_top_k,
+            "sps_candidate_pool_size": sps_candidate_pool_size,
+            "sps_rollouts_per_candidate": sps_rollouts_per_candidate,
+            "sps_rollout_horizon": sps_rollout_horizon,
             "cache_path": str(trajectory_cache.path)
             if trajectory_cache is not None
             else None,
@@ -866,6 +1053,7 @@ def run_condition(
     if archive_build_id is not None or condition in (
         "polaris_full_verified_memory",
         "proicl_gepa_mcmc_memory",
+        "proicl_gepa_mcmc_fork_repair_memory",
     ):
         write_json(
             out_dir / "archive_build_manifest.json",
@@ -888,11 +1076,18 @@ def run_condition(
         f"- B/problem: {B}\n"
         f"- mcmc_steps: {mcmc_steps}\n"
         f"- mcmc_block_num: {mcmc_block_num}\n"
+        f"- sps_top_k: {sps_top_k}\n"
+        f"- sps_candidate_pool_size: {sps_candidate_pool_size}\n"
+        f"- sps_rollouts_per_candidate: {sps_rollouts_per_candidate}\n"
+        f"- sps_rollout_horizon: {sps_rollout_horizon}\n"
         f"- alpha_policy: {schedule.policy_id}\n"
+        f"- repair_enabled: {repair_enabled}\n"
+        f"- fork_search_enabled: {fork_enabled}\n"
         f"- selector: {selector_id}\n"
         f"- backend: {serving_backend_metadata.get('backend')}\n"
         f"- vllm_scoring_mode: {serving_backend_metadata.get('vllm_scoring_mode')}\n"
-        f"- accuracy: {accuracy:.4f}\n",
+        f"- accuracy: {accuracy:.4f}\n"
+        f"- mean_selected_score: {mean_selected_score:.4f}\n",
         encoding="utf-8",
     )
 
@@ -908,7 +1103,14 @@ def run_condition(
         "sampling_temperature": low_temp_temperature,
         "mcmc_steps": mcmc_steps,
         "mcmc_block_num": mcmc_block_num,
+        "power_sampler": power_sampler,
+        "sps_top_k": sps_top_k,
+        "sps_candidate_pool_size": sps_candidate_pool_size,
+        "sps_rollouts_per_candidate": sps_rollouts_per_candidate,
+        "sps_rollout_horizon": sps_rollout_horizon,
         "schedule_alphas": list(schedule.alphas),
+        "repair_enabled": repair_enabled,
+        "fork_search_enabled": fork_enabled,
         "selector_id": selector_id,
         "dataset_lock_id": dataset_lock_id,
         "archive_build_id": archive_build_id,

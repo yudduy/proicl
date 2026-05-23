@@ -54,6 +54,9 @@ def _parse_args() -> argparse.Namespace:
     submit.add_argument("--num-shards", type=int, default=4)
     submit.add_argument("--array-tasks", type=int, default=None)
     submit.add_argument("--max-concurrent", type=int, default=None)
+    submit.add_argument("--cpus-per-task", type=int, default=8)
+    submit.add_argument("--mem", default="48G")
+    submit.add_argument("--gres", default="gpu:1")
     submit.add_argument("--time-limit", default="02:00:00")
     submit.add_argument("--command", required=True)
     submit.add_argument("--script-out", type=Path, default=None)
@@ -66,6 +69,7 @@ def _parse_args() -> argparse.Namespace:
     sync = sub.add_parser("sync", help="print or run rsync for repo/artifacts")
     sync.add_argument("--direction", choices=["up", "down"], required=True)
     sync.add_argument("--remote-root", default="/scratch/users/$USER/polaris")
+    sync.add_argument("--remote-artifacts", default="runs/prorl_recovery")
     sync.add_argument("--local-artifacts", type=Path, default=REPO_ROOT / "runs" / "farmshare")
     sync.add_argument("--execute", action="store_true")
 
@@ -135,7 +139,10 @@ def _cmd_submit(args: argparse.Namespace) -> None:
             num_shards=args.num_shards,
             array_tasks=args.array_tasks,
             max_concurrent=args.max_concurrent,
+            cpus_per_task=args.cpus_per_task,
+            mem=args.mem,
             time_limit=args.time_limit,
+            gres=args.gres,
         )
     )
     if args.script_out is not None:
@@ -171,10 +178,13 @@ def _cmd_sync(args: argparse.Namespace) -> None:
         )
     else:
         args.local_artifacts.mkdir(parents=True, exist_ok=True)
+        remote_artifacts = str(
+            getattr(args, "remote_artifacts", "runs/prorl_recovery")
+        ).strip("/")
         cmd = [
             "rsync",
             "-az",
-            f"{args.host}:{args.remote_root}/runs/prorl_recovery/",
+            f"{args.host}:{args.remote_root}/{remote_artifacts}/",
             f"{args.local_artifacts}/",
         ]
     if args.execute:

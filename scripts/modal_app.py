@@ -48,6 +48,7 @@ image = (
         "pandas",
         "scipy",
         "tqdm",
+        "reasoning-gym",
     )
     .add_local_dir(str(POLARIS_ROOT), remote_path="/polaris", copy=True, ignore=_IGNORE)
 )
@@ -934,3 +935,108 @@ def run_one(
     runs_vol.commit()
     print(f"{condition} seed={seed} metrics: {metrics}")
     return metrics
+
+
+@app.function(
+    gpu="A100-40GB",
+    timeout=3600 * 6,
+    volumes={"/cache/huggingface": hf_cache, "/polaris-runs": runs_vol},
+)
+def run_proicl_xfamily(
+    user_authorized_paid_run: bool = False,
+    estimated_dollar_cost: float | None = 5.0,
+    cost_cap_dollars: float | None = 20.0,
+    run_tag: str = "xfamily-v1",
+    n_eval: int = 5,
+    n_gepa_dev: int = 3,
+    rollout_budget: int = 4,
+    max_metric_calls: int = 16,
+    archive_size: int = 2,
+) -> dict:
+    """Cross-family ProICL: GEPA trained on family_relationships, evaluated on graph_color.
+
+    This is the held-out generalization test — GEPA never sees graph_color during
+    prompt optimization. Run with:
+        modal run scripts/modal_app.py::run_proicl_xfamily --user-authorized-paid-run true
+    Pull results:
+        modal volume get polaris-runs /proicl-xfamily runs/proicl_xfamily_modal/
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path as _Path
+
+    _setup_paths()
+
+    split = (20, 20 + n_eval)
+    _require_modal_preflight(
+        backend="hf",
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+        split=split,
+        seed=17,
+        artifact_dir=f"/polaris-runs/proicl-xfamily/{run_tag}",
+        cache_path=f"/polaris-runs/proicl-xfamily/{run_tag}/trajectories.sqlite",
+    )
+
+    os.environ["HF_HOME"] = "/cache/huggingface"
+    os.environ["HF_HUB_CACHE"] = "/cache/huggingface/hub"
+    os.environ["TRANSFORMERS_CACHE"] = "/cache/huggingface"
+    # hf_transfer not installed in debian_slim image — disable to avoid crash in subprocesses
+    os.environ.pop("HF_HUB_ENABLE_HF_TRANSFER", None)
+    # No git binary in debian_slim — bypass vendored_commit() subprocess calls
+    os.environ.setdefault("POLARIS_RWS_COMMIT", "modal-run")
+    os.environ.setdefault("POLARIS_GEPA_COMMIT", "modal-run")
+    os.environ.setdefault("POLARIS_EVALPLUS_COMMIT", "modal-run")
+    os.environ.setdefault("POLARIS_DC_COMMIT", "modal-run")
+
+    out_dir = _Path(f"/polaris-runs/proicl-xfamily/{run_tag}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        sys.executable,
+        "/polaris/scripts/run_proicl_signal.py",
+        "--root", str(out_dir),
+        "--tracks",
+            "reasoning_gym_family_relationships",
+            "reasoning_gym_graph_color_n10",
+            "reasoning_gym_graph_color_n12",
+        "--conditions",
+            "base_greedy",
+            "mcmc_only",
+            "gepa_mcmc",
+            "prorl_v2_greedy",
+        "--archive-scope", "cross_family_curriculum",
+        "--archive-train-tracks", "reasoning_gym_family_relationships",
+        "--archive-heldout-tracks", "reasoning_gym_graph_color_n10", "reasoning_gym_graph_color_n12",
+        "--eval-split", str(20), str(20 + n_eval),
+        "--gepa-dev-split", str(0), str(n_gepa_dev),
+        "--rollout-budget", str(rollout_budget),
+        "--archive-size", str(archive_size),
+        "--max-metric-calls", str(max_metric_calls),
+        "--num-shards", "1",
+        "--backend", "hf",
+        "--run-kind", "modal",
+        "--run-stage", "small_real_slice",
+        "--cost-cap-dollars", str(cost_cap_dollars),
+        "--reflection-provider", "local-hf",
+        "--reflection-model-id", "Qwen/Qwen2.5-7B-Instruct",
+        "--skip-prefetch",
+        "--skip-smoke",
+        "--gpus", "0",
+    ]
+
+    print("Launching:", " ".join(cmd), flush=True)
+    result = subprocess.run(cmd, cwd="/polaris", text=True, check=False)
+
+    runs_vol.commit()
+
+    decomp_path = out_dir / "analysis" / "proicl_decomposition.json"
+    if decomp_path.exists():
+        import json
+        decomp = json.loads(decomp_path.read_text())
+        print("=== DECOMPOSITION ===")
+        print(json.dumps(decomp, indent=2))
+        return decomp
+    return {"returncode": result.returncode, "error": "decomposition not written"}

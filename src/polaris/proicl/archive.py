@@ -9,17 +9,36 @@ from polaris.core.archive import FrozenArchive, PromptEntry
 from polaris.evals.datasets.math500 import Problem
 from polaris.gepa_reflection import XAIReflectionConfig, reflection_manifest
 from polaris.io.rollouts import RolloutLedger
+from polaris.proicl.protocol import (
+    ArchiveScope,
+    archive_scope_id,
+    validate_archive_scope_membership,
+)
 
 
 PROICL_REASONING_GYM_TRACKS: tuple[str, ...] = (
-    "reasoning_gym_boxnet",
-    "reasoning_gym_graph_color",
     "reasoning_gym_family_relationships",
+    "reasoning_gym_graph_color_n5",
+    "reasoning_gym_graph_color_n8",
+    "reasoning_gym_graph_color_n10",
+    "reasoning_gym_graph_color_n12",
+    "reasoning_gym_graph_color_n13",
+    "reasoning_gym_graph_color_n14",
+    "reasoning_gym_graph_color_n15",
+    "reasoning_gym_graph_color_n16",
+    "reasoning_gym_graph_color_n18",
+    "reasoning_gym_graph_color_n20",
+    "reasoning_gym_boxnet",
+    "reasoning_gym_acre",
+    "reasoning_gym_game_of_life_halting",
+    "reasoning_gym_maze",
+    "reasoning_gym_palindrome_generation",
+    "reasoning_gym_letter_counting",
 )
 
 _DEFAULT_SUFFIX = (
-    "\n\nReturn only the required final value inside <answer>...</answer>. "
-    "If the answer is JSON, the content inside the answer tag must be raw valid JSON."
+    "\n\nReturn only the final value requested by the task. Do not include a "
+    "placeholder, example answer, or extra prose in the final response."
 )
 
 _SEED_PREFIXES: tuple[tuple[str, str], ...] = (
@@ -163,7 +182,8 @@ def _run_live_gepa(
         seed_candidate={
             "instruction": (
                 "Solve the verifier-scored reasoning task. Reason through the "
-                "task rules and return the final answer in the requested format.\n\n"
+                "task rules and return exactly one final answer-tag block in the "
+                "requested format.\n\n"
             )
         },
         trainset=rows,
@@ -188,6 +208,8 @@ def build_cross_task_curriculum_archive(
     *,
     out_dir: Path,
     tracks: tuple[str, ...] = PROICL_REASONING_GYM_TRACKS,
+    archive_scope: ArchiveScope | str = ArchiveScope.WITHIN_FAMILY,
+    heldout_tracks: tuple[str, ...] = (),
     dev_split: tuple[int, int] = (0, 100),
     archive_size: int = 16,
     dry_run: bool = True,
@@ -207,8 +229,15 @@ def build_cross_task_curriculum_archive(
     calls cannot happen accidentally from this helper.
     """
 
+    archive_scope = ArchiveScope(archive_scope)
+    heldout_tracks = tuple(heldout_tracks or tracks)
     if not tracks:
         raise ValueError("at least one track is required")
+    validate_archive_scope_membership(
+        archive_scope=archive_scope,
+        train_tracks=tracks,
+        heldout_tracks=heldout_tracks,
+    )
     if archive_size <= 0:
         raise ValueError("archive_size must be positive")
     if max_metric_calls <= 0:
@@ -239,17 +268,15 @@ def build_cross_task_curriculum_archive(
             seed=seed,
         )
 
-    archive_build_id = (
-        f"proicl-cross-task-gepa-k{archive_size}-seed-{seed}-"
-        f"{dev_split[0]}-{dev_split[1]}"
-    )
+    scope_id = archive_scope_id(archive_scope, tracks)
+    archive_build_id = f"{scope_id}-k{archive_size}-seed-{seed}-{dev_split[0]}-{dev_split[1]}"
     archive_payload = {
         "entries": archive.to_jsonable(),
         "cell_fitness": {
             entry.descriptor_hint: 1.0 for entry in archive.entries
         },
         "archive_build_id": archive_build_id,
-        "selection_rule": "gepa_pareto_cross_task_reasoning_gym",
+        "selection_rule": f"gepa_pareto_{archive_scope.value}",
         "frozen": True,
     }
     _write_json(out_dir / "archive.json", archive_payload)
@@ -284,8 +311,11 @@ def build_cross_task_curriculum_archive(
         }
     manifest = {
         "archive_build_id": archive_build_id,
-        "archive_scope": "cross_task_reasoning_gym",
+        "archive_scope": archive_scope.value,
+        "archive_scope_id": scope_id,
         "tracks": list(tracks),
+        "train_tracks": list(tracks),
+        "heldout_tracks": list(heldout_tracks),
         "dev_split": list(dev_split),
         "dev_source": dev_source,
         "archive_size": archive_size,
@@ -301,6 +331,9 @@ def build_cross_task_curriculum_archive(
             "optimizer_feedback_split_only": True,
             "no_prorl_or_brorl_traces": True,
             "heldout_eval_not_used_for_prompt_evolution": True,
+            "cross_family_target_leakage_blocked": (
+                archive_scope == ArchiveScope.CROSS_FAMILY_CURRICULUM
+            ),
         },
         "artifact_paths": {
             "archive": str(out_dir / "archive.json"),

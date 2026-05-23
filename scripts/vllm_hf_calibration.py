@@ -1,4 +1,4 @@
-"""Write HF-vLLM scorer calibration artifacts for POLARIS MCMC.
+"""Write HF-vLLM scorer calibration artifacts for POLARIS SPS/MCMC.
 
 This is a bounded calibration harness, not a production science run. It loads
 HF as the oracle scorer, loads vLLM as the candidate scorer, verifies token IDs
@@ -22,11 +22,33 @@ if str(SRC_ROOT) not in sys.path:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--model-key",
+        default=None,
+        help="Optional POLARIS model registry key; supplies model id/revision.",
+    )
     parser.add_argument("--model-id", default="Qwen/Qwen2.5-Math-7B")
     parser.add_argument("--model-revision", default=None)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--temperature", type=float, default=0.25)
     parser.add_argument("--segment-lens", type=int, nargs="+", default=[1, 2, 8, 32, 128])
+    parser.add_argument(
+        "--hf-dtype",
+        choices=["auto", "float32", "bfloat16", "float16"],
+        default="float32",
+        help="HF oracle dtype for calibration. float32 matches the accepted vLLM parity contract.",
+    )
+    parser.add_argument(
+        "--hf-scoring-mode",
+        choices=["forward", "cached_decode"],
+        default="cached_decode",
+        help="HF oracle scoring path for fixed segments.",
+    )
+    parser.add_argument(
+        "--hf-device-map-auto",
+        action="store_true",
+        help="Use Transformers device_map='auto' for the HF oracle. By default calibration loads directly on CUDA.",
+    )
     parser.add_argument(
         "--vllm-scoring-mode",
         choices=["forced_decode_v0", "native_segment"],
@@ -36,6 +58,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--vllm-model-impl", default="transformers")
     parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.55)
     parser.add_argument("--vllm-max-model-len", type=int, default=4096)
+    parser.add_argument(
+        "--no-vllm-prefix-caching",
+        action="store_true",
+        help="Disable vLLM prefix caching for this calibration candidate.",
+    )
     parser.add_argument("--local-files-only", action="store_true")
     return parser.parse_args()
 
@@ -153,10 +180,20 @@ def main() -> None:
         score_parity_rows,
         write_calibration_artifacts,
     )
+    if args.model_key:
+        from polaris.registry import resolve_model
+
+        model_spec = resolve_model(args.model_key)
+        args.model_id = model_spec.hf_id
+        if args.model_revision is None:
+            args.model_revision = model_spec.revision
 
     hf = RWSGenerator(
         model_id=args.model_id,
         revision=args.model_revision,
+        torch_dtype=args.hf_dtype,
+        score_segments_mode=args.hf_scoring_mode,
+        device_map_auto=args.hf_device_map_auto,
         local_files_only=args.local_files_only,
     )
     vllm = VLLMGenerator(
@@ -168,6 +205,7 @@ def main() -> None:
         max_model_len=args.vllm_max_model_len,
         local_files_only=args.local_files_only,
         scoring_mode=args.vllm_scoring_mode,
+        enable_prefix_caching=not args.no_vllm_prefix_caching,
         parity_artifact_path=str(args.out),
     )
 
@@ -175,6 +213,7 @@ def main() -> None:
     vllm_prefix_ids, vllm_segments, _ = _segments(vllm.tokenizer, args.segment_lens)
     tokenizer_parity = {
         "passed": hf_prefix_ids == vllm_prefix_ids and target_segments == vllm_segments,
+        "model_id": args.model_id,
         "prefix_len": len(hf_prefix_ids),
         "segment_lens": [len(row) for row in target_segments],
         "model_revision": args.model_revision,
@@ -234,6 +273,18 @@ def main() -> None:
         temperature=args.temperature,
     )
     full_chain_replay["tokenizer_parity"] = tokenizer_parity
+    full_chain_replay["runtime_metadata"] = {
+        "backend": "vllm",
+        "model_id": args.model_id,
+        "model_revision": args.model_revision,
+        "hf_dtype": args.hf_dtype,
+        "hf_scoring_mode": args.hf_scoring_mode,
+        "hf_device_map_auto": args.hf_device_map_auto,
+        "vllm_scoring_mode": args.vllm_scoring_mode,
+        "vllm_dtype": args.vllm_dtype,
+        "vllm_model_impl": args.vllm_model_impl,
+        "vllm_prefix_caching": not args.no_vllm_prefix_caching,
+    }
     full_chain_replay["segment_cases"] = segment_meta["cases"]
     full_chain_replay["hf_runtime_metadata"] = hf.runtime_metadata()
     full_chain_replay["vllm_runtime_metadata"] = vllm.runtime_metadata()

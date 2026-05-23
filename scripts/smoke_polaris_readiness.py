@@ -122,6 +122,8 @@ class _SmokeSampler:
         *,
         temperature: float,
         max_new_tokens: int,
+        mcmc_steps: int | None = None,
+        block_num: int | None = None,
         seed_base: int | None = None,
         seed_offsets: list[int] | None = None,
     ) -> list[_SmokeGeneration]:

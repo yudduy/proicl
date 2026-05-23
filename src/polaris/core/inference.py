@@ -30,6 +30,14 @@ class Candidate:
     token_ids: list[int] = field(default_factory=list)
     logprobs_norm: list[float] = field(default_factory=list)
     logprobs_unnorm: list[float] = field(default_factory=list)
+    search_trace_id: str | None = None
+    parent_candidate_id: str | None = None
+    repair_attempt: int | None = None
+    fork_depth: int | None = None
+    fork_entropy: float | None = None
+    fork_token: str | None = None
+    fork_probability: float | None = None
+    search_strategy: str | None = None
 
 
 class _SamplerLike(Protocol):
@@ -45,6 +53,15 @@ class _SamplerLike(Protocol):
 
     def generate_low_temp(
         self, prompt_text: str, *, temperature: float, max_new_tokens: int
+    ) -> Any: ...
+
+    def generate_sps_power(
+        self,
+        prompt_text: str,
+        *,
+        temperature: float,
+        max_new_tokens: int,
+        block_num: int = ...,
     ) -> Any: ...
 
 
@@ -87,6 +104,7 @@ def polaris_inference(
     token_counter: Callable[[str], int] = _token_count,
     mcmc_steps: int | None = None,
     mcmc_block_num: int | None = None,
+    power_sampler: str = "mcmc",
 ) -> tuple[Candidate, list[Candidate]]:
     """Run POLARIS inference for one query under a fixed budget (proposal §7).
 
@@ -182,7 +200,19 @@ def polaris_inference(
                     temperature=1.0,
                     max_new_tokens=max_new_tokens,
                 )
-            else:
+            elif power_sampler == "sps":
+                sps_fn = getattr(sampler, "generate_sps_power", None)
+                if not callable(sps_fn):
+                    raise NotImplementedError(
+                        "power_sampler='sps' requires sampler.generate_sps_power"
+                    )
+                gen = sps_fn(
+                    prompt_text,
+                    temperature=1.0 / alpha,
+                    max_new_tokens=max_new_tokens,
+                    block_num=mcmc_block_num if mcmc_block_num is not None else 16,
+                )
+            elif power_sampler == "mcmc":
                 power_kwargs: dict[str, Any] = {}
                 if mcmc_steps is not None:
                     power_kwargs["mcmc_steps"] = mcmc_steps
@@ -194,6 +224,8 @@ def polaris_inference(
                     max_new_tokens=max_new_tokens,
                     **power_kwargs,
                 )
+            else:
+                raise ValueError(f"unknown power_sampler: {power_sampler!r}")
             full_response = (
                 gen.generation
                 if gen.response_contains_prompt

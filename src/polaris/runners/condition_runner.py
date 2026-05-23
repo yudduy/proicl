@@ -56,6 +56,47 @@ class TrackConfig:
     selector_id: str
 
 
+def _graph_color_size_track(size: int) -> TrackConfig:
+    return TrackConfig(
+        track_id=f"reasoning_gym_graph_color_n{size}",
+        benchmark=f"Reasoning Gym graph_color n={size}",
+        dataset_loader=lambda start, end, size=size: load_reasoning_gym_slice(
+            "graph_color", start, end, min_num_vertices=size, max_num_vertices=size
+        ),
+        optimizer_dev_loader=lambda start, end, size=size: load_reasoning_gym_slice(
+            "graph_color", start, end, min_num_vertices=size, max_num_vertices=size
+        ),
+        verifier=score_reasoning_gym,
+        verifier_id=RG_VERIFIER_ID,
+        default_split=(0, 100),
+        inference_time_verifier=True,
+        selector_id="reasoning_gym_score_answer-v1",
+    )
+
+
+def _reasoning_gym_track(
+    *,
+    track_id: str,
+    task: str,
+    benchmark: str | None = None,
+) -> TrackConfig:
+    return TrackConfig(
+        track_id=track_id,
+        benchmark=benchmark or f"Reasoning Gym {task}",
+        dataset_loader=lambda start, end, task=task: load_reasoning_gym_slice(
+            task, start, end
+        ),
+        optimizer_dev_loader=lambda start, end, task=task: load_reasoning_gym_slice(
+            task, start, end
+        ),
+        verifier=score_reasoning_gym,
+        verifier_id=RG_VERIFIER_ID,
+        default_split=(0, 100),
+        inference_time_verifier=True,
+        selector_id="reasoning_gym_score_answer-v1",
+    )
+
+
 TRACK_CONFIGS: dict[str, TrackConfig] = {
     "math500": TrackConfig(
         track_id="math500",
@@ -103,9 +144,69 @@ TRACK_CONFIGS: dict[str, TrackConfig] = {
     ),
     "reasoning_gym_graph_color": TrackConfig(
         track_id="reasoning_gym_graph_color",
-        benchmark="Reasoning Gym graph_color",
+        benchmark="Reasoning Gym graph_color n=10",
         dataset_loader=lambda start, end: load_reasoning_gym_slice("graph_color", start, end),
         optimizer_dev_loader=lambda start, end: load_reasoning_gym_slice("graph_color", start, end),
+        verifier=score_reasoning_gym,
+        verifier_id=RG_VERIFIER_ID,
+        default_split=(0, 100),
+        inference_time_verifier=True,
+        selector_id="reasoning_gym_score_answer-v1",
+    ),
+    "reasoning_gym_graph_color_n10": TrackConfig(
+        track_id="reasoning_gym_graph_color_n10",
+        benchmark="Reasoning Gym graph_color n=10",
+        dataset_loader=lambda start, end: load_reasoning_gym_slice(
+            "graph_color", start, end, min_num_vertices=10, max_num_vertices=10
+        ),
+        optimizer_dev_loader=lambda start, end: load_reasoning_gym_slice(
+            "graph_color", start, end, min_num_vertices=10, max_num_vertices=10
+        ),
+        verifier=score_reasoning_gym,
+        verifier_id=RG_VERIFIER_ID,
+        default_split=(0, 100),
+        inference_time_verifier=True,
+        selector_id="reasoning_gym_score_answer-v1",
+    ),
+    "reasoning_gym_graph_color_n12": TrackConfig(
+        track_id="reasoning_gym_graph_color_n12",
+        benchmark="Reasoning Gym graph_color n=12",
+        dataset_loader=lambda start, end: load_reasoning_gym_slice(
+            "graph_color", start, end, min_num_vertices=12, max_num_vertices=12
+        ),
+        optimizer_dev_loader=lambda start, end: load_reasoning_gym_slice(
+            "graph_color", start, end, min_num_vertices=12, max_num_vertices=12
+        ),
+        verifier=score_reasoning_gym,
+        verifier_id=RG_VERIFIER_ID,
+        default_split=(0, 100),
+        inference_time_verifier=True,
+        selector_id="reasoning_gym_score_answer-v1",
+    ),
+    "reasoning_gym_graph_color_n14": TrackConfig(
+        track_id="reasoning_gym_graph_color_n14",
+        benchmark="Reasoning Gym graph_color n=14",
+        dataset_loader=lambda start, end: load_reasoning_gym_slice(
+            "graph_color", start, end, min_num_vertices=14, max_num_vertices=14
+        ),
+        optimizer_dev_loader=lambda start, end: load_reasoning_gym_slice(
+            "graph_color", start, end, min_num_vertices=14, max_num_vertices=14
+        ),
+        verifier=score_reasoning_gym,
+        verifier_id=RG_VERIFIER_ID,
+        default_split=(0, 100),
+        inference_time_verifier=True,
+        selector_id="reasoning_gym_score_answer-v1",
+    ),
+    "reasoning_gym_graph_color_n16": TrackConfig(
+        track_id="reasoning_gym_graph_color_n16",
+        benchmark="Reasoning Gym graph_color n=16",
+        dataset_loader=lambda start, end: load_reasoning_gym_slice(
+            "graph_color", start, end, min_num_vertices=16, max_num_vertices=16
+        ),
+        optimizer_dev_loader=lambda start, end: load_reasoning_gym_slice(
+            "graph_color", start, end, min_num_vertices=16, max_num_vertices=16
+        ),
         verifier=score_reasoning_gym,
         verifier_id=RG_VERIFIER_ID,
         default_split=(0, 100),
@@ -127,7 +228,38 @@ TRACK_CONFIGS: dict[str, TrackConfig] = {
         inference_time_verifier=True,
         selector_id="reasoning_gym_score_answer-v1",
     ),
+    "reasoning_gym_acre": _reasoning_gym_track(
+        track_id="reasoning_gym_acre",
+        task="acre",
+    ),
+    "reasoning_gym_game_of_life_halting": _reasoning_gym_track(
+        track_id="reasoning_gym_game_of_life_halting",
+        task="game_of_life_halting",
+    ),
+    "reasoning_gym_maze": _reasoning_gym_track(
+        track_id="reasoning_gym_maze",
+        task="maze",
+    ),
+    "reasoning_gym_palindrome_generation": _reasoning_gym_track(
+        track_id="reasoning_gym_palindrome_generation",
+        task="palindrome_generation",
+        benchmark="Reasoning Gym palindrome_generation",
+    ),
+    "reasoning_gym_palindrome": _reasoning_gym_track(
+        track_id="reasoning_gym_palindrome",
+        task="palindrome_generation",
+        benchmark="Reasoning Gym palindrome_generation",
+    ),
+    "reasoning_gym_letter_counting": _reasoning_gym_track(
+        track_id="reasoning_gym_letter_counting",
+        task="letter_counting",
+    ),
 }
+
+for _graph_color_size in (5, 8, 10, 12, 13, 14, 15, 16, 18, 20):
+    TRACK_CONFIGS[f"reasoning_gym_graph_color_n{_graph_color_size}"] = (
+        _graph_color_size_track(_graph_color_size)
+    )
 
 
 def get_track_config(track: str) -> TrackConfig:

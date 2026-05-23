@@ -73,7 +73,16 @@ def _budget_for_condition(condition: str, stage: str) -> int:
 def _alpha_policy_for_condition(condition: str) -> str:
     if condition == "bon_temp1" or condition == "bon_temp1_archive":
         return "bon_temp1"
-    if condition in ("full_archive_mixed", "polaris_full_verified_memory"):
+    if condition in (
+        "full_archive_mixed",
+        "polaris_full_verified_memory",
+        "proicl_gepa_mcmc",
+        "proicl_gepa_mcmc_memory",
+        "mixed_alpha_mcmc",
+        "proicl_gepa_mcmc_repair",
+        "proicl_gepa_mcmc_fork_repair",
+        "proicl_gepa_mcmc_fork_repair_memory",
+    ):
         return "mixed_alpha_4_1"
     if condition == "full_archive_decaying":
         return "decaying_alpha_4_to_1"
@@ -81,7 +90,11 @@ def _alpha_policy_for_condition(condition: str) -> str:
 
 
 def _memory_mode_for_condition(condition: str) -> str:
-    if condition in ("polaris_full_verified_memory", "proicl_gepa_mcmc_memory"):
+    if condition in (
+        "polaris_full_verified_memory",
+        "proicl_gepa_mcmc_memory",
+        "proicl_gepa_mcmc_fork_repair_memory",
+    ):
         return "distilled_strategies"
     condition_spec = CONDITION_REGISTRY[condition]
     return "baseline_native" if condition_spec.uses_memory else "none"
