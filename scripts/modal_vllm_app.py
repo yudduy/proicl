@@ -1167,3 +1167,43 @@ def smoke_experiment_one_problem_a100_80gb(
         cost_cap_dollars=cost_cap_dollars,
         user_authorized_paid_run=user_authorized_paid_run,
     )
+
+
+@app.function(
+    gpu="H100",
+    timeout=3600,
+    volumes={"/cache/huggingface": hf_cache},
+)
+def smoke_experiment_one_problem_h100(
+    max_new_tokens: int = 64,
+    sps_top_k: int = 2,
+    sps_candidate_pool_size: int = 2,
+    sps_rollouts_per_candidate: int = 1,
+    sps_rollout_horizon: int = 16,
+    estimated_dollar_cost: float | None = None,
+    cost_cap_dollars: float | None = None,
+    user_authorized_paid_run: bool = False,
+) -> dict:
+    """Run the release-facing experiment smoke on one held-out boxnet problem."""
+    _setup_paths()
+    _require_modal_preflight(
+        backend="vllm",
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+        artifact_dir="/tmp/proicl-one-problem-vllm",
+        model_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    )
+    return _smoke_proicl_one_problem_vllm_native_impl(
+        condition="single_prompt_power",
+        power_sampler="sps",
+        scoring_mode="forced_decode_v0",
+        max_new_tokens=max_new_tokens,
+        sps_top_k=sps_top_k,
+        sps_candidate_pool_size=sps_candidate_pool_size,
+        sps_rollouts_per_candidate=sps_rollouts_per_candidate,
+        sps_rollout_horizon=sps_rollout_horizon,
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+    )
