@@ -78,7 +78,7 @@ def _run_cell(
         str(args.split[1]),
         "--seed",
         "17",
-        "--polaris-source-hash",
+        "--proicl-source-hash",
         "sps-calibration",
         "--preregistration-anchor",
         "TODO.md#sps-transition-amendment",

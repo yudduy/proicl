@@ -164,10 +164,10 @@ def source_hash(repo_root: Path) -> str:
 
 def vendored_commit(repo_root: Path, rel: str) -> str:
     env_key = {
-        "upstream/reasoning-with-sampling": "POLARIS_RWS_COMMIT",
-        "upstream/gepa": "POLARIS_GEPA_COMMIT",
-        "upstream/evalplus": "POLARIS_EVALPLUS_COMMIT",
-        "upstream/dynamic-cheatsheet": "POLARIS_DC_COMMIT",
+        "upstream/reasoning-with-sampling": "PROICL_RWS_COMMIT",
+        "upstream/gepa": "PROICL_GEPA_COMMIT",
+        "upstream/evalplus": "PROICL_EVALPLUS_COMMIT",
+        "upstream/dynamic-cheatsheet": "PROICL_DC_COMMIT",
     }.get(rel)
     if env_key and os.environ.get(env_key):
         return str(os.environ[env_key])
@@ -404,7 +404,7 @@ def run_condition_command(
         str(max_new_tokens),
         "--power-sampler",
         power_sampler,
-        "--polaris-source-hash",
+        "--proicl-source-hash",
         polaris_source_hash,
         "--preregistration-anchor",
         "TODO.PROICL.md#proicl-fast-weight-recovery-audit",

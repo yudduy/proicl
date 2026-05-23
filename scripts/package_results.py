@@ -1,4 +1,4 @@
-"""Package a POLARIS experiment run into a small, shareable result bundle."""
+"""Package a ProICL experiment run into a small, shareable result bundle."""
 
 from __future__ import annotations
 
@@ -156,7 +156,6 @@ def _agreement_rows(selected_rows: list[dict[str, Any]]) -> list[dict[str, Any]]
 def _copy_cell_artifacts(full_root: Path, bundle_root: Path, *, include_candidates: bool) -> None:
     rels = [
         "metrics.json",
-        "costs.json",
         "selected.jsonl",
         "scores.jsonl",
         "preflight.json",
@@ -178,6 +177,7 @@ def _copy_cell_artifacts(full_root: Path, bundle_root: Path, *, include_candidat
 
 def _copy_top_level(full_root: Path, run_root: Path, bundle_root: Path) -> None:
     for rel in [
+        "launch_config.json",
         "run_index.json",
         "events.jsonl",
         "proicl_signal_plan.json",
@@ -271,7 +271,7 @@ def main() -> None:
     _copy_top_level(full_root, run_root, out)
     _copy_cell_artifacts(full_root, out, include_candidates=args.include_candidates)
     manifest = {
-        "schema": "polaris_results_bundle.v1",
+        "schema": "proicl_results_bundle.v1",
         "run_root": str(run_root),
         "full_root": str(full_root),
         "metrics_rows": len(metrics_rows),

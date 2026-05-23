@@ -1,4 +1,4 @@
-"""Compatibility shim for the generic POLARIS condition runner."""
+"""Compatibility shim for the generic ProICL condition runner."""
 
 from __future__ import annotations
 
@@ -32,7 +32,13 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--model-revision", default=None)
-    parser.add_argument("--polaris-source-hash", required=True)
+    parser.add_argument(
+        "--proicl-source-hash",
+        "--polaris-source-hash",
+        dest="polaris_source_hash",
+        metavar="PROICL_SOURCE_HASH",
+        required=True,
+    )
     parser.add_argument("--preregistration-anchor", required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--backend", choices=["hf", "vllm"], default="hf")
@@ -91,7 +97,7 @@ def main() -> None:
         str(args.test_slice[1]),
         "--seed",
         str(args.seed),
-        "--polaris-source-hash",
+        "--proicl-source-hash",
         args.polaris_source_hash,
         "--preregistration-anchor",
         args.preregistration_anchor,

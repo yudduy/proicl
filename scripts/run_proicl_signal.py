@@ -128,8 +128,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--vllm-parity-artifact", type=Path, default=None)
     parser.add_argument("--run-kind", default="flow")
     parser.add_argument("--run-stage", default="small_real_slice")
-    parser.add_argument("--cost-cap-dollars", type=float, default=4.0)
-    parser.add_argument("--estimated-dollar-cost-per-cell", type=float, default=0.25)
+    parser.add_argument("--cost-cap-dollars", type=float, default=0.0)
+    parser.add_argument("--estimated-dollar-cost-per-cell", type=float, default=0.0)
     parser.add_argument("--estimated-wall-clock-seconds-per-cell", type=float, default=7200)
     parser.add_argument("--reflection-provider", choices=["xai", "local-hf"], default="local-hf")
     parser.add_argument("--reflection-model-id", default="Qwen/Qwen2.5-7B-Instruct")
@@ -209,10 +209,10 @@ def _setup_env(args: argparse.Namespace) -> dict[str, str]:
     if args.reflection_provider == "xai":
         env["XAI_REFLECTION_INITIAL_CAP_DOLLARS"] = str(args.xai_reflection_cap_dollars)
         env["XAI_REFLECTION_HARD_CAP_DOLLARS"] = str(args.xai_reflection_cap_dollars)
-    env.setdefault("POLARIS_RWS_COMMIT", vendored_commit(REPO_ROOT, "upstream/reasoning-with-sampling"))
-    env.setdefault("POLARIS_GEPA_COMMIT", vendored_commit(REPO_ROOT, "upstream/gepa"))
-    env.setdefault("POLARIS_EVALPLUS_COMMIT", vendored_commit(REPO_ROOT, "upstream/evalplus"))
-    env.setdefault("POLARIS_DC_COMMIT", vendored_commit(REPO_ROOT, "upstream/dynamic-cheatsheet"))
+    env.setdefault("PROICL_RWS_COMMIT", vendored_commit(REPO_ROOT, "upstream/reasoning-with-sampling"))
+    env.setdefault("PROICL_GEPA_COMMIT", vendored_commit(REPO_ROOT, "upstream/gepa"))
+    env.setdefault("PROICL_EVALPLUS_COMMIT", vendored_commit(REPO_ROOT, "upstream/evalplus"))
+    env.setdefault("PROICL_DC_COMMIT", vendored_commit(REPO_ROOT, "upstream/dynamic-cheatsheet"))
     return env
 
 

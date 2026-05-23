@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Run the POLARIS held-out experiment.
+Run the ProICL held-out experiment.
 
 Default run:
   bash scripts/run_experiment.sh
@@ -23,6 +23,7 @@ Environment knobs:
   GEPA_DEV_START/END       GEPA dev slice. Default: 0/50
   ROLLOUT_BUDGET           Samples per non-greedy condition. Default: 8
   NUM_SHARDS               Per-condition shards. Default: detected GPU count, at least 1
+  GPUS                     Optional comma-separated GPU ids; sets CUDA_VISIBLE_DEVICES.
   MAX_NEW_TOKENS           Generation cap. Default: 1024
   SPS_BLOCK_SIZE           Target SPS block size. Default: 192
   SPS_BLOCK_NUM            Override computed SPS block count.
@@ -32,8 +33,6 @@ Environment knobs:
   SPS_ROLLOUT_HORIZON      Lookahead horizon tokens. Default: 128
   GPU_PROFILE              auto, a100, h100, or generic. Default: auto
   VLLM_PARITY_ARTIFACT     Existing calibration_summary.json. If unset, calibration is run.
-  COST_CAP_DOLLARS         Required for paid/cloud RUN_KIND values; default 0.0 for local/farmshare.
-  ESTIMATED_DOLLAR_COST_PER_CELL Default 0.0 for local/farmshare; required for paid/cloud.
   SKIP_INSTALL=1           Reuse the current environment.
   SKIP_CALIBRATION=1       Require VLLM_PARITY_ARTIFACT instead of running calibration.
   SKIP_SPS_MATH500_CALIBRATION=1 Skip the SPS-vs-MCMC MATH500 gate.
@@ -56,6 +55,10 @@ SKIP_CALIBRATION="${SKIP_CALIBRATION:-0}"
 SKIP_SPS_MATH500_CALIBRATION="${SKIP_SPS_MATH500_CALIBRATION:-0}"
 SMOKE_ONLY="${SMOKE_ONLY:-0}"
 INCLUDE_CANDIDATES="${INCLUDE_CANDIDATES:-0}"
+
+if [[ -n "${GPUS:-}" ]]; then
+  export CUDA_VISIBLE_DEVICES="$GPUS"
+fi
 
 RUN_ROOT="${RUN_ROOT:-runs/experiment}"
 RUN_TAG="${RUN_TAG:-heldout}"
@@ -152,24 +155,12 @@ case "$GPU_PROFILE" in
     ;;
 esac
 
-if [[ "$RUN_KIND" == "local" || "$RUN_KIND" == "farmshare" ]]; then
-  COST_CAP_DOLLARS="${COST_CAP_DOLLARS:-0.0}"
-  ESTIMATED_DOLLAR_COST_PER_CELL="${ESTIMATED_DOLLAR_COST_PER_CELL:-0.0}"
-else
-  if [[ -z "${COST_CAP_DOLLARS:-}" ]]; then
-    echo "COST_CAP_DOLLARS is required for paid/cloud RUN_KIND=$RUN_KIND" >&2
-    exit 1
-  fi
-  if [[ -z "${ESTIMATED_DOLLAR_COST_PER_CELL:-}" ]]; then
-    echo "ESTIMATED_DOLLAR_COST_PER_CELL is required for paid/cloud RUN_KIND=$RUN_KIND" >&2
-    exit 1
-  fi
-fi
 ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL="${ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL:-$DEFAULT_WALL_CLOCK_SECONDS_PER_CELL}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-$DEFAULT_VLLM_GPU_MEMORY_UTILIZATION}"
 CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="${CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION:-$DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION}"
+PARALLELISM_STRATEGY="one cell worker per visible GPU; GEPA/archive build reserves GPU 0 while direct baseline cells overlap on remaining GPUs"
 
-CACHE_ROOT="${POLARIS_CACHE_ROOT:-$REPO_ROOT/.cache/polaris}"
+CACHE_ROOT="${PROICL_CACHE_ROOT:-$REPO_ROOT/.cache/proicl}"
 export HF_HOME="${HF_HOME:-$CACHE_ROOT/huggingface}"
 export HF_HUB_CACHE="${HF_HUB_CACHE:-$HF_HOME/hub}"
 export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HOME/hub}"
@@ -187,6 +178,92 @@ if [[ "$DRY_RUN" != "1" ]]; then
   mkdir -p "$RUN_ROOT" "$CACHE_ROOT" "$HF_HOME" "$PIP_CACHE_DIR"
 fi
 
+write_launch_config() {
+  local out="$1"
+  "$PY" - "$out" <<'PY'
+import json
+import os
+import sys
+
+out = sys.argv[1]
+payload = {
+    "schema": "proicl_launch_config.v1",
+    "gpu_profile": os.environ["PROICL_GPU_PROFILE"],
+    "gpu_count": int(os.environ["PROICL_GPU_COUNT"]),
+    "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+    "num_shards": int(os.environ["PROICL_NUM_SHARDS"]),
+    "parallelism_strategy": os.environ["PROICL_PARALLELISM_STRATEGY"],
+    "vllm_gpu_memory_utilization": float(os.environ["PROICL_VLLM_GPU_MEMORY_UTILIZATION"]),
+    "calibration_vllm_gpu_memory_utilization": float(
+        os.environ["PROICL_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION"]
+    ),
+    "estimated_wall_clock_seconds_per_cell": int(
+        os.environ["PROICL_ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"]
+    ),
+    "run_root": os.environ["PROICL_RUN_ROOT"],
+    "run_tag": os.environ["PROICL_RUN_TAG"],
+    "tracks": os.environ["PROICL_TRACKS"].split(),
+    "conditions": os.environ["PROICL_CONDITIONS"].split(),
+    "eval_split": [
+        int(os.environ["PROICL_EVAL_START"]),
+        int(os.environ["PROICL_EVAL_END"]),
+    ],
+    "gepa_dev_split": [
+        int(os.environ["PROICL_GEPA_DEV_START"]),
+        int(os.environ["PROICL_GEPA_DEV_END"]),
+    ],
+    "rollout_budget": int(os.environ["PROICL_ROLLOUT_BUDGET"]),
+    "max_new_tokens": int(os.environ["PROICL_MAX_NEW_TOKENS"]),
+    "sps": {
+        "block_num": int(os.environ["PROICL_SPS_BLOCK_NUM"]),
+        "top_k": int(os.environ["PROICL_SPS_TOP_K"]),
+        "candidate_pool_size": int(os.environ["PROICL_SPS_CANDIDATE_POOL_SIZE"]),
+        "rollouts_per_candidate": int(os.environ["PROICL_SPS_ROLLOUTS_PER_CANDIDATE"]),
+        "rollout_horizon": int(os.environ["PROICL_SPS_ROLLOUT_HORIZON"]),
+    },
+}
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(payload, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
+}
+
+print_launch_summary() {
+  echo "ProICL launch profile:"
+  echo "  gpu_profile=$GPU_PROFILE gpu_count=$GPU_COUNT cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-all}"
+  echo "  num_shards=$NUM_SHARDS strategy=$PARALLELISM_STRATEGY"
+  echo "  vllm_gpu_memory_utilization=$VLLM_GPU_MEMORY_UTILIZATION calibration=$CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION"
+  echo "  estimated_wall_clock_seconds_per_cell=$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
+}
+
+export PROICL_GPU_PROFILE="$GPU_PROFILE"
+export PROICL_GPU_COUNT="$GPU_COUNT"
+export PROICL_NUM_SHARDS="$NUM_SHARDS"
+export PROICL_PARALLELISM_STRATEGY="$PARALLELISM_STRATEGY"
+export PROICL_VLLM_GPU_MEMORY_UTILIZATION="$VLLM_GPU_MEMORY_UTILIZATION"
+export PROICL_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="$CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION"
+export PROICL_ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL="$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
+export PROICL_RUN_ROOT="$RUN_ROOT"
+export PROICL_RUN_TAG="$RUN_TAG"
+export PROICL_TRACKS="$TRACKS"
+export PROICL_CONDITIONS="$CONDITIONS"
+export PROICL_EVAL_START="$EVAL_START"
+export PROICL_EVAL_END="$EVAL_END"
+export PROICL_GEPA_DEV_START="$GEPA_DEV_START"
+export PROICL_GEPA_DEV_END="$GEPA_DEV_END"
+export PROICL_ROLLOUT_BUDGET="$ROLLOUT_BUDGET"
+export PROICL_MAX_NEW_TOKENS="$MAX_NEW_TOKENS"
+export PROICL_SPS_BLOCK_NUM="$SPS_BLOCK_NUM"
+export PROICL_SPS_TOP_K="$SPS_TOP_K"
+export PROICL_SPS_CANDIDATE_POOL_SIZE="$SPS_CANDIDATE_POOL_SIZE"
+export PROICL_SPS_ROLLOUTS_PER_CANDIDATE="$SPS_ROLLOUTS_PER_CANDIDATE"
+export PROICL_SPS_ROLLOUT_HORIZON="$SPS_ROLLOUT_HORIZON"
+
+print_launch_summary
+if [[ "$DRY_RUN" != "1" ]]; then
+  write_launch_config "$RUN_ROOT/launch_config.json"
+fi
+
 run_cmd() {
   printf '+'
   printf ' %q' "$@"
@@ -197,7 +274,7 @@ run_cmd() {
 }
 
 if [[ "$DRY_RUN" != "1" && ! -f pyproject.toml ]]; then
-  echo "Run this script from the POLARIS repository root." >&2
+  echo "Run this script from the ProICL repository root." >&2
   exit 1
 fi
 
@@ -212,7 +289,6 @@ if [[ "$DRY_RUN" != "1" && "$SKIP_INSTALL" != "1" ]]; then
 fi
 
 if [[ "$DRY_RUN" != "1" ]]; then
-  run_cmd bash scripts/check_protocol_sync.sh
   if ! command -v nvidia-smi >/dev/null 2>&1; then
     echo "nvidia-smi not found; this run needs a CUDA GPU host." >&2
     exit 1
@@ -252,8 +328,6 @@ if [[ "$SKIP_SPS_MATH500_CALIBRATION" != "1" && "$SMOKE_ONLY" != "1" ]]; then
     --sps-rollouts-per-candidate "$SPS_ROLLOUTS_PER_CANDIDATE" \
     --sps-rollout-horizon "$SPS_ROLLOUT_HORIZON" \
     --vllm-parity-artifact "$CALIB_ARTIFACT" \
-    --cost-cap-dollars "$COST_CAP_DOLLARS" \
-    --estimated-dollar-cost-per-cell "$ESTIMATED_DOLLAR_COST_PER_CELL" \
     --estimated-wall-clock-seconds-per-cell "$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL" \
     --tolerance "$SPS_CALIBRATION_TOLERANCE"
   run_cmd "$PY" scripts/check_sps_calibration.py "$SPS_CALIB_DIR" \
@@ -293,8 +367,6 @@ MAIN_CMD=(
   --sps-rollout-horizon "$SPS_ROLLOUT_HORIZON"
   --num-shards "$NUM_SHARDS"
   --memory-num-shards 1
-  --cost-cap-dollars "$COST_CAP_DOLLARS"
-  --estimated-dollar-cost-per-cell "$ESTIMATED_DOLLAR_COST_PER_CELL"
   --estimated-wall-clock-seconds-per-cell "$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
   --reflection-provider "$REFLECTION_PROVIDER"
   --reflection-model-id "$REFLECTION_MODEL_ID"
@@ -335,6 +407,7 @@ if [[ -z "$RUN_DIR" ]]; then
   echo "Could not identify standardized run directory under $RUN_ROOT" >&2
   exit 1
 fi
+cp "$RUN_ROOT/launch_config.json" "$RUN_DIR/launch_config.json"
 
 PACKAGE_ROOT="$RUN_DIR"
 if [[ "$SMOKE_ONLY" == "1" ]]; then

@@ -35,8 +35,6 @@ dist/
 # Generated experiment artifacts and local runtime state.
 # Keep the dated decision log tracked; keep bulky artifacts external.
 runs/*
-!runs/progress.md
-!runs/README.md
 
 # Local / remote caches and model artifacts
 .cache/
@@ -51,7 +49,6 @@ runs/*
 
 # Reference clones are documented, not committed as nested repos.
 upstream/*
-!upstream/README.md
 
 # Keep the public surface minimal: only README.md is tracked as Markdown docs.
 *.md
