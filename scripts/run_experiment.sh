@@ -427,4 +427,6 @@ run_cmd "${PACKAGE_CMD[@]}"
 
 echo
 echo "Run directory: $RUN_DIR"
-echo "Result bundle: $PACKAGE_ROOT/results_bundle.tar.gz"
+BUNDLE_PATH="$PACKAGE_ROOT/results_bundle.tar.gz"
+BUNDLE_ABS="$(cd "$(dirname "$BUNDLE_PATH")" && pwd)/$(basename "$BUNDLE_PATH")"
+echo "Result bundle: $BUNDLE_ABS"
