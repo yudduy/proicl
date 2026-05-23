@@ -19,6 +19,12 @@ rollout_budget: 8
 num_shards: auto_gpu_count
 sampling:
   implementation: scalable_power_sampling
+  paper_contract:
+    target_distribution: p_alpha
+    approximation: scaled_low_temperature_with_future_lookahead
+    verifier_free_sampling: true
+    verifier_use: final_scoring_and_selection_only
+    jackknife_correction: true
   alpha: 4
   top_k: 8
   candidate_pool_size: 8

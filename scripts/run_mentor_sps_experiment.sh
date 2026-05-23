@@ -30,7 +30,10 @@ Environment knobs:
   SPS_CANDIDATE_POOL_SIZE  Candidate blocks sampled per SPS step. Default: 8
   SPS_ROLLOUTS_PER_CANDIDATE Lookahead rollouts per candidate. Default: 8
   SPS_ROLLOUT_HORIZON      Lookahead horizon tokens. Default: 128
+  GPU_PROFILE              auto, a100, h100, or generic. Default: auto
   VLLM_PARITY_ARTIFACT     Existing calibration_summary.json. If unset, calibration is run.
+  COST_CAP_DOLLARS         Required for paid/cloud RUN_KIND values; default 0.0 for local/farmshare.
+  ESTIMATED_DOLLAR_COST_PER_CELL Default 0.0 for local/farmshare; required for paid/cloud.
   SKIP_INSTALL=1           Reuse the current environment.
   SKIP_CALIBRATION=1       Require VLLM_PARITY_ARTIFACT instead of running calibration.
   SKIP_SPS_MATH500_CALIBRATION=1 Skip the SPS-vs-MCMC MATH500 gate.
@@ -80,9 +83,6 @@ SPS_ROLLOUT_HORIZON="${SPS_ROLLOUT_HORIZON:-128}"
 
 RUN_KIND="${RUN_KIND:-local}"
 RUN_STAGE="${RUN_STAGE:-small_real_slice}"
-COST_CAP_DOLLARS="${COST_CAP_DOLLARS:-0.0}"
-ESTIMATED_DOLLAR_COST_PER_CELL="${ESTIMATED_DOLLAR_COST_PER_CELL:-0.0}"
-ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL="${ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL:-7200}"
 REFLECTION_PROVIDER="${REFLECTION_PROVIDER:-local-hf}"
 REFLECTION_MODEL_ID="${REFLECTION_MODEL_ID:-Qwen/Qwen2.5-7B-Instruct}"
 MATH_CALIB_START="${MATH_CALIB_START:-0}"
@@ -108,11 +108,66 @@ detect_gpu_count() {
   echo 1
 }
 
+detect_gpu_profile() {
+  local raw_names
+  raw_names="${GPU_NAMES:-}"
+  if [[ -z "$raw_names" ]] && command -v nvidia-smi >/dev/null 2>&1; then
+    raw_names="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || true)"
+  fi
+  case "$(tr '[:upper:]' '[:lower:]' <<<"$raw_names")" in
+    *h100*) echo "h100" ;;
+    *a100*) echo "a100" ;;
+    *) echo "generic" ;;
+  esac
+}
+
 GPU_COUNT="$(detect_gpu_count)"
 if [[ "$GPU_COUNT" -lt 1 ]]; then
   GPU_COUNT=1
 fi
 NUM_SHARDS="${NUM_SHARDS:-$GPU_COUNT}"
+GPU_PROFILE="${GPU_PROFILE:-auto}"
+if [[ "$GPU_PROFILE" == "auto" ]]; then
+  GPU_PROFILE="$(detect_gpu_profile)"
+fi
+case "$GPU_PROFILE" in
+  h100)
+    DEFAULT_VLLM_GPU_MEMORY_UTILIZATION="0.88"
+    DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.60"
+    DEFAULT_WALL_CLOCK_SECONDS_PER_CELL="3600"
+    ;;
+  a100)
+    DEFAULT_VLLM_GPU_MEMORY_UTILIZATION="0.85"
+    DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.55"
+    DEFAULT_WALL_CLOCK_SECONDS_PER_CELL="7200"
+    ;;
+  generic)
+    DEFAULT_VLLM_GPU_MEMORY_UTILIZATION="0.80"
+    DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.50"
+    DEFAULT_WALL_CLOCK_SECONDS_PER_CELL="7200"
+    ;;
+  *)
+    echo "GPU_PROFILE must be one of auto, a100, h100, generic; got $GPU_PROFILE" >&2
+    exit 1
+    ;;
+esac
+
+if [[ "$RUN_KIND" == "local" || "$RUN_KIND" == "farmshare" ]]; then
+  COST_CAP_DOLLARS="${COST_CAP_DOLLARS:-0.0}"
+  ESTIMATED_DOLLAR_COST_PER_CELL="${ESTIMATED_DOLLAR_COST_PER_CELL:-0.0}"
+else
+  if [[ -z "${COST_CAP_DOLLARS:-}" ]]; then
+    echo "COST_CAP_DOLLARS is required for paid/cloud RUN_KIND=$RUN_KIND" >&2
+    exit 1
+  fi
+  if [[ -z "${ESTIMATED_DOLLAR_COST_PER_CELL:-}" ]]; then
+    echo "ESTIMATED_DOLLAR_COST_PER_CELL is required for paid/cloud RUN_KIND=$RUN_KIND" >&2
+    exit 1
+  fi
+fi
+ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL="${ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL:-$DEFAULT_WALL_CLOCK_SECONDS_PER_CELL}"
+VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-$DEFAULT_VLLM_GPU_MEMORY_UTILIZATION}"
+CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="${CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION:-$DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION}"
 
 CACHE_ROOT="${POLARIS_CACHE_ROOT:-$REPO_ROOT/.cache/polaris}"
 export HF_HOME="${HF_HOME:-$CACHE_ROOT/huggingface}"
@@ -180,7 +235,7 @@ if [[ -z "${VLLM_PARITY_ARTIFACT:-}" && ! -f "$CALIB_ARTIFACT" ]]; then
     --hf-dtype float32 \
     --vllm-dtype float32 \
     --vllm-model-impl transformers \
-    --vllm-gpu-memory-utilization "${CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION:-0.55}" \
+    --vllm-gpu-memory-utilization "$CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION" \
     --vllm-max-model-len "${VLLM_MAX_MODEL_LEN:-4096}"
 fi
 
