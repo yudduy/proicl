@@ -34,6 +34,7 @@ Environment knobs:
   GPU_PROFILE              auto, a100, h100, or generic. Default: auto
   VLLM_PARITY_ARTIFACT     Existing calibration_summary.json. If unset, calibration is run.
   SKIP_INSTALL=1           Reuse the current environment.
+  INSTALL_PROFILE          light or full. Default: light.
   SKIP_CALIBRATION=1       Require VLLM_PARITY_ARTIFACT instead of running calibration.
   SKIP_SPS_MATH500_CALIBRATION=1 Skip the SPS-vs-MCMC MATH500 gate.
   SMOKE_ONLY=1             Run only the harness smoke.
@@ -51,6 +52,7 @@ cd "$REPO_ROOT"
 
 DRY_RUN="${DRY_RUN:-0}"
 SKIP_INSTALL="${SKIP_INSTALL:-0}"
+INSTALL_PROFILE="${INSTALL_PROFILE:-light}"
 SKIP_CALIBRATION="${SKIP_CALIBRATION:-0}"
 SKIP_SPS_MATH500_CALIBRATION="${SKIP_SPS_MATH500_CALIBRATION:-0}"
 SMOKE_ONLY="${SMOKE_ONLY:-0}"
@@ -284,7 +286,18 @@ if [[ "$DRY_RUN" != "1" && "$SKIP_INSTALL" != "1" ]]; then
     PY="$REPO_ROOT/$VENV/bin/python"
   fi
   run_cmd "$PY" -m pip install -U pip wheel setuptools
-  run_cmd "$PY" -m pip install -e ".[code,dc,gepa_reflection]"
+  case "$INSTALL_PROFILE" in
+    light)
+      run_cmd "$PY" -m pip install -e .
+      ;;
+    full)
+      run_cmd "$PY" -m pip install -e ".[code,dc,gepa_reflection]"
+      ;;
+    *)
+      echo "INSTALL_PROFILE must be light or full; got $INSTALL_PROFILE" >&2
+      exit 1
+      ;;
+  esac
   run_cmd "$PY" -m pip install "vllm==0.9.2"
 fi
 
