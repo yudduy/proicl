@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Run the POLARIS held-out experiment.
+Run the ProICL held-out experiment.
 
 Default run:
   bash scripts/run_experiment.sh
@@ -175,7 +175,7 @@ VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-$DEFAULT_VLLM_GPU_ME
 CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="${CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION:-$DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION}"
 PARALLELISM_STRATEGY="one cell worker per visible GPU; GEPA/archive build reserves GPU 0 while direct baseline cells overlap on remaining GPUs"
 
-CACHE_ROOT="${POLARIS_CACHE_ROOT:-$REPO_ROOT/.cache/polaris}"
+CACHE_ROOT="${PROICL_CACHE_ROOT:-$REPO_ROOT/.cache/proicl}"
 export HF_HOME="${HF_HOME:-$CACHE_ROOT/huggingface}"
 export HF_HUB_CACHE="${HF_HUB_CACHE:-$HF_HOME/hub}"
 export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HOME/hub}"
@@ -202,39 +202,39 @@ import sys
 
 out = sys.argv[1]
 payload = {
-    "schema": "polaris_launch_config.v1",
-    "gpu_profile": os.environ["POLARIS_GPU_PROFILE"],
-    "gpu_count": int(os.environ["POLARIS_GPU_COUNT"]),
+    "schema": "proicl_launch_config.v1",
+    "gpu_profile": os.environ["PROICL_GPU_PROFILE"],
+    "gpu_count": int(os.environ["PROICL_GPU_COUNT"]),
     "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
-    "num_shards": int(os.environ["POLARIS_NUM_SHARDS"]),
-    "parallelism_strategy": os.environ["POLARIS_PARALLELISM_STRATEGY"],
-    "vllm_gpu_memory_utilization": float(os.environ["POLARIS_VLLM_GPU_MEMORY_UTILIZATION"]),
+    "num_shards": int(os.environ["PROICL_NUM_SHARDS"]),
+    "parallelism_strategy": os.environ["PROICL_PARALLELISM_STRATEGY"],
+    "vllm_gpu_memory_utilization": float(os.environ["PROICL_VLLM_GPU_MEMORY_UTILIZATION"]),
     "calibration_vllm_gpu_memory_utilization": float(
-        os.environ["POLARIS_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION"]
+        os.environ["PROICL_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION"]
     ),
     "estimated_wall_clock_seconds_per_cell": int(
-        os.environ["POLARIS_ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"]
+        os.environ["PROICL_ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"]
     ),
-    "run_root": os.environ["POLARIS_RUN_ROOT"],
-    "run_tag": os.environ["POLARIS_RUN_TAG"],
-    "tracks": os.environ["POLARIS_TRACKS"].split(),
-    "conditions": os.environ["POLARIS_CONDITIONS"].split(),
+    "run_root": os.environ["PROICL_RUN_ROOT"],
+    "run_tag": os.environ["PROICL_RUN_TAG"],
+    "tracks": os.environ["PROICL_TRACKS"].split(),
+    "conditions": os.environ["PROICL_CONDITIONS"].split(),
     "eval_split": [
-        int(os.environ["POLARIS_EVAL_START"]),
-        int(os.environ["POLARIS_EVAL_END"]),
+        int(os.environ["PROICL_EVAL_START"]),
+        int(os.environ["PROICL_EVAL_END"]),
     ],
     "gepa_dev_split": [
-        int(os.environ["POLARIS_GEPA_DEV_START"]),
-        int(os.environ["POLARIS_GEPA_DEV_END"]),
+        int(os.environ["PROICL_GEPA_DEV_START"]),
+        int(os.environ["PROICL_GEPA_DEV_END"]),
     ],
-    "rollout_budget": int(os.environ["POLARIS_ROLLOUT_BUDGET"]),
-    "max_new_tokens": int(os.environ["POLARIS_MAX_NEW_TOKENS"]),
+    "rollout_budget": int(os.environ["PROICL_ROLLOUT_BUDGET"]),
+    "max_new_tokens": int(os.environ["PROICL_MAX_NEW_TOKENS"]),
     "sps": {
-        "block_num": int(os.environ["POLARIS_SPS_BLOCK_NUM"]),
-        "top_k": int(os.environ["POLARIS_SPS_TOP_K"]),
-        "candidate_pool_size": int(os.environ["POLARIS_SPS_CANDIDATE_POOL_SIZE"]),
-        "rollouts_per_candidate": int(os.environ["POLARIS_SPS_ROLLOUTS_PER_CANDIDATE"]),
-        "rollout_horizon": int(os.environ["POLARIS_SPS_ROLLOUT_HORIZON"]),
+        "block_num": int(os.environ["PROICL_SPS_BLOCK_NUM"]),
+        "top_k": int(os.environ["PROICL_SPS_TOP_K"]),
+        "candidate_pool_size": int(os.environ["PROICL_SPS_CANDIDATE_POOL_SIZE"]),
+        "rollouts_per_candidate": int(os.environ["PROICL_SPS_ROLLOUTS_PER_CANDIDATE"]),
+        "rollout_horizon": int(os.environ["PROICL_SPS_ROLLOUT_HORIZON"]),
     },
 }
 with open(out, "w", encoding="utf-8") as f:
@@ -244,35 +244,35 @@ PY
 }
 
 print_launch_summary() {
-  echo "POLARIS launch profile:"
+  echo "ProICL launch profile:"
   echo "  gpu_profile=$GPU_PROFILE gpu_count=$GPU_COUNT cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-all}"
   echo "  num_shards=$NUM_SHARDS strategy=$PARALLELISM_STRATEGY"
   echo "  vllm_gpu_memory_utilization=$VLLM_GPU_MEMORY_UTILIZATION calibration=$CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION"
   echo "  estimated_wall_clock_seconds_per_cell=$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
 }
 
-export POLARIS_GPU_PROFILE="$GPU_PROFILE"
-export POLARIS_GPU_COUNT="$GPU_COUNT"
-export POLARIS_NUM_SHARDS="$NUM_SHARDS"
-export POLARIS_PARALLELISM_STRATEGY="$PARALLELISM_STRATEGY"
-export POLARIS_VLLM_GPU_MEMORY_UTILIZATION="$VLLM_GPU_MEMORY_UTILIZATION"
-export POLARIS_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="$CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION"
-export POLARIS_ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL="$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
-export POLARIS_RUN_ROOT="$RUN_ROOT"
-export POLARIS_RUN_TAG="$RUN_TAG"
-export POLARIS_TRACKS="$TRACKS"
-export POLARIS_CONDITIONS="$CONDITIONS"
-export POLARIS_EVAL_START="$EVAL_START"
-export POLARIS_EVAL_END="$EVAL_END"
-export POLARIS_GEPA_DEV_START="$GEPA_DEV_START"
-export POLARIS_GEPA_DEV_END="$GEPA_DEV_END"
-export POLARIS_ROLLOUT_BUDGET="$ROLLOUT_BUDGET"
-export POLARIS_MAX_NEW_TOKENS="$MAX_NEW_TOKENS"
-export POLARIS_SPS_BLOCK_NUM="$SPS_BLOCK_NUM"
-export POLARIS_SPS_TOP_K="$SPS_TOP_K"
-export POLARIS_SPS_CANDIDATE_POOL_SIZE="$SPS_CANDIDATE_POOL_SIZE"
-export POLARIS_SPS_ROLLOUTS_PER_CANDIDATE="$SPS_ROLLOUTS_PER_CANDIDATE"
-export POLARIS_SPS_ROLLOUT_HORIZON="$SPS_ROLLOUT_HORIZON"
+export PROICL_GPU_PROFILE="$GPU_PROFILE"
+export PROICL_GPU_COUNT="$GPU_COUNT"
+export PROICL_NUM_SHARDS="$NUM_SHARDS"
+export PROICL_PARALLELISM_STRATEGY="$PARALLELISM_STRATEGY"
+export PROICL_VLLM_GPU_MEMORY_UTILIZATION="$VLLM_GPU_MEMORY_UTILIZATION"
+export PROICL_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="$CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION"
+export PROICL_ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL="$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
+export PROICL_RUN_ROOT="$RUN_ROOT"
+export PROICL_RUN_TAG="$RUN_TAG"
+export PROICL_TRACKS="$TRACKS"
+export PROICL_CONDITIONS="$CONDITIONS"
+export PROICL_EVAL_START="$EVAL_START"
+export PROICL_EVAL_END="$EVAL_END"
+export PROICL_GEPA_DEV_START="$GEPA_DEV_START"
+export PROICL_GEPA_DEV_END="$GEPA_DEV_END"
+export PROICL_ROLLOUT_BUDGET="$ROLLOUT_BUDGET"
+export PROICL_MAX_NEW_TOKENS="$MAX_NEW_TOKENS"
+export PROICL_SPS_BLOCK_NUM="$SPS_BLOCK_NUM"
+export PROICL_SPS_TOP_K="$SPS_TOP_K"
+export PROICL_SPS_CANDIDATE_POOL_SIZE="$SPS_CANDIDATE_POOL_SIZE"
+export PROICL_SPS_ROLLOUTS_PER_CANDIDATE="$SPS_ROLLOUTS_PER_CANDIDATE"
+export PROICL_SPS_ROLLOUT_HORIZON="$SPS_ROLLOUT_HORIZON"
 
 print_launch_summary
 if [[ "$DRY_RUN" != "1" ]]; then
@@ -289,7 +289,7 @@ run_cmd() {
 }
 
 if [[ "$DRY_RUN" != "1" && ! -f pyproject.toml ]]; then
-  echo "Run this script from the POLARIS repository root." >&2
+  echo "Run this script from the ProICL repository root." >&2
   exit 1
 fi
 

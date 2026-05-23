@@ -1,7 +1,7 @@
 [project]
-name = "polaris"
+name = "proicl"
 version = "0.2.0"
-description = "POLARIS: inference-time composition for RL-style reasoning gains (frozen base model + prompt-archive spread + scalable power sampling + verifier-gated memory)"
+description = "ProICL: inference-time composition for RL-style reasoning gains (frozen base model + prompt-archive spread + scalable power sampling + verifier-gated memory)"
 requires-python = ">=3.11"
 dependencies = [
   "accelerate",

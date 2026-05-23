@@ -1,4 +1,4 @@
-"""Package a POLARIS experiment run into a small, shareable result bundle."""
+"""Package a ProICL experiment run into a small, shareable result bundle."""
 
 from __future__ import annotations
 
@@ -272,7 +272,7 @@ def main() -> None:
     _copy_top_level(full_root, run_root, out)
     _copy_cell_artifacts(full_root, out, include_candidates=args.include_candidates)
     manifest = {
-        "schema": "polaris_results_bundle.v1",
+        "schema": "proicl_results_bundle.v1",
         "run_root": str(run_root),
         "full_root": str(full_root),
         "metrics_rows": len(metrics_rows),

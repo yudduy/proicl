@@ -10,7 +10,7 @@ from pathlib import Path
 
 import modal
 
-POLARIS_ROOT = Path(__file__).resolve().parent.parent
+PROICL_ROOT = Path(__file__).resolve().parent.parent
 
 _IGNORE = [
     ".venv*",
@@ -37,19 +37,19 @@ vllm_image = (
             "HF_HUB_ENABLE_HF_TRANSFER": "1",
         }
     )
-    .add_local_dir(str(POLARIS_ROOT), remote_path="/polaris", copy=True, ignore=_IGNORE)
+    .add_local_dir(str(PROICL_ROOT), remote_path="/proicl", copy=True, ignore=_IGNORE)
 )
 
-app = modal.App("polaris-vllm-smokes", image=vllm_image)
-hf_cache = modal.Volume.from_name("polaris-hf-cache", create_if_missing=True)
+app = modal.App("proicl-vllm-smokes", image=vllm_image)
+hf_cache = modal.Volume.from_name("proicl-hf-cache", create_if_missing=True)
 
 
 def _setup_paths() -> None:
     import os
     import sys
 
-    if "/polaris/src" not in sys.path:
-        sys.path.insert(0, "/polaris/src")
+    if "/proicl/src" not in sys.path:
+        sys.path.insert(0, "/proicl/src")
     os.environ["HF_HOME"] = "/cache/huggingface"
     os.environ["HF_HUB_CACHE"] = "/cache/huggingface/hub"
     os.environ["TRANSFORMERS_CACHE"] = "/cache/huggingface"
@@ -62,7 +62,7 @@ def _require_modal_preflight(
     estimated_dollar_cost: float | None,
     cost_cap_dollars: float | None,
     user_authorized_paid_run: bool,
-    artifact_dir: str = "/polaris-modal-smoke",
+    artifact_dir: str = "/proicl-modal-smoke",
     cache_path: str = "/cache/huggingface",
     model_id: str | None = None,
 ) -> dict:
@@ -106,7 +106,7 @@ def _run_python_json(script: str) -> dict:
     import subprocess
 
     env = os.environ.copy()
-    env["PYTHONPATH"] = "/polaris/src"
+    env["PYTHONPATH"] = "/proicl/src"
     proc = subprocess.run(
         ["python", "-c", script],
         env=env,
@@ -114,7 +114,7 @@ def _run_python_json(script: str) -> dict:
         text=True,
         timeout=1200,
     )
-    marker = "POLARIS_JSON:"
+    marker = "PROICL_JSON:"
     for line in reversed(proc.stdout.splitlines()):
         if line.startswith(marker):
             return json.loads(line[len(marker) :])
@@ -319,7 +319,7 @@ summary = {{
     "hf_generate_unnorm_head": hf_proc.lp_unnorm[:5],
     "vllm_unnorm_head": vllm_scores.lp_unnorm_tokens[0][:5],
 }}
-print("POLARIS_JSON:" + json.dumps(summary, sort_keys=True))
+print("PROICL_JSON:" + json.dumps(summary, sort_keys=True))
 """
     )
     print(f"smoke_vllm_parity: {summary}")
@@ -417,7 +417,7 @@ summary = {{
         and 0.0 <= out.acceptance_ratio <= 1.0
     ),
 }}
-print("POLARIS_JSON:" + json.dumps(summary, sort_keys=True))
+print("PROICL_JSON:" + json.dumps(summary, sort_keys=True))
 """
     )
     print(f"smoke_vllm_power_path: {summary}")
@@ -527,7 +527,7 @@ summary = {{
     "generation_tails": [out.generation[-180:] for out in outs[:2]],
     "passed": alignment_passed and len(outs) == batch_size,
 }}
-print("POLARIS_JSON:" + json.dumps(summary, sort_keys=True))
+print("PROICL_JSON:" + json.dumps(summary, sort_keys=True))
 """
     )
     print(f"smoke_vllm_batched_power_path: {summary}")
@@ -681,7 +681,7 @@ summary = {{
     "token_ids_head": token_ids[:8],
     "passed": native_norm_diff < 1e-3 and prompt_unnorm_diff < 1e-3,
 }}
-print("POLARIS_JSON:" + json.dumps(summary, sort_keys=True))
+print("PROICL_JSON:" + json.dumps(summary, sort_keys=True))
 """
     )
     print(f"smoke_vllm_logprobs_probe: {summary}")
@@ -715,10 +715,10 @@ import json
 import subprocess
 from pathlib import Path
 
-out = Path("/tmp/polaris-vllm-calibration-{gate}")
+out = Path("/tmp/proicl-vllm-calibration-{gate}")
 cmd = [
     "python",
-    "/polaris/scripts/vllm_hf_calibration.py",
+    "/proicl/scripts/vllm_hf_calibration.py",
     "--model-id",
     {MODEL_ID!r},
     "--out",
@@ -737,7 +737,7 @@ subprocess.run(cmd, check=True, text=True)
 summary = json.loads((out / "calibration_summary.json").read_text())
 summary["requested_gate"] = {gate!r}
 summary["artifact_dir"] = str(out)
-print("POLARIS_JSON:" + json.dumps(summary, sort_keys=True))
+print("PROICL_JSON:" + json.dumps(summary, sort_keys=True))
 """
     )
     print(f"smoke_vllm_{gate}: {summary}")
@@ -883,7 +883,7 @@ root = Path("/tmp/proicl-one-problem-vllm")
 subprocess.run(
     [
         "python",
-        "/polaris/scripts/run_proicl.py",
+        "/proicl/scripts/run_proicl.py",
         "write-direct-archives",
         "--root",
         str(root),
@@ -897,7 +897,7 @@ calibration = root / "calibration"
 subprocess.run(
     [
         "python",
-        "/polaris/scripts/vllm_hf_calibration.py",
+        "/proicl/scripts/vllm_hf_calibration.py",
         "--model-id",
         {model_id!r},
         "--model-revision",
@@ -929,7 +929,7 @@ subprocess.run(
 out = root / "run"
 cmd = [
     "python",
-    "/polaris/scripts/run_condition.py",
+    "/proicl/scripts/run_condition.py",
     "--track",
     "reasoning_gym_boxnet",
     "--model-key",
@@ -945,7 +945,7 @@ cmd = [
     "21",
     "--seed",
     "17",
-    "--polaris-source-hash",
+    "--proicl-source-hash",
     "modal-vllm-smoke",
     "--preregistration-anchor",
     "TODO.PROICL.md#proicl-fast-weight-recovery-audit",
@@ -993,7 +993,7 @@ summary = {{
     "serving_backend": manifest.get("config", {{}}).get("serving_backend"),
     "artifact_dir": str(out),
 }}
-print("POLARIS_JSON:" + json.dumps(summary, sort_keys=True))
+print("PROICL_JSON:" + json.dumps(summary, sort_keys=True))
 """
     )
     print(f"smoke_proicl_one_problem_vllm_native: {summary}")

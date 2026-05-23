@@ -1,4 +1,4 @@
-"""Run one POLARIS condition for any registered track.
+"""Run one ProICL condition for any registered track.
 
 `--preflight-only` validates launch gates and exits before loading model
 backends or datasets. Paid/full runs still require explicit authorization.
@@ -54,7 +54,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--split", type=int, nargs=2, required=True)
     parser.add_argument("--seed", type=int, default=17)
-    parser.add_argument("--polaris-source-hash", required=True)
+    parser.add_argument(
+        "--proicl-source-hash",
+        "--polaris-source-hash",
+        dest="polaris_source_hash",
+        metavar="PROICL_SOURCE_HASH",
+        required=True,
+    )
     parser.add_argument("--preregistration-anchor", required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--backend", choices=["hf", "vllm"], default="hf")

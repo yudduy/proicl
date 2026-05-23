@@ -1,4 +1,4 @@
-# POLARIS Held-Out Experiment
+# ProICL Held-Out Experiment
 
 Run: `bash scripts/run_experiment.sh`
 It auto-detects visible A100/H100 GPUs, runs calibration + held-out eval, audits artifacts, and writes `runs/experiment/<run-id>/results_bundle.tar.gz`.
