@@ -1134,7 +1134,7 @@ def smoke_proicl_one_problem_vllm_a100_80gb(
     timeout=3600,
     volumes={"/cache/huggingface": hf_cache},
 )
-def smoke_sps_recovery_one_problem_a100_80gb(
+def smoke_experiment_one_problem_a100_80gb(
     max_new_tokens: int = 64,
     sps_top_k: int = 2,
     sps_candidate_pool_size: int = 2,
@@ -1144,7 +1144,7 @@ def smoke_sps_recovery_one_problem_a100_80gb(
     cost_cap_dollars: float | None = None,
     user_authorized_paid_run: bool = False,
 ) -> dict:
-    """Run the release-facing SPS recovery smoke on one held-out boxnet problem."""
+    """Run the release-facing experiment smoke on one held-out boxnet problem."""
     _setup_paths()
     _require_modal_preflight(
         backend="vllm",

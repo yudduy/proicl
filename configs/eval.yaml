@@ -1,4 +1,4 @@
-experiment: sps_recovery
+experiment: heldout_reasoning
 phase: heldout_eval
 frozen_policy_model: deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
 rl_reference_model: nvidia/Nemotron-Research-Reasoning-Qwen-1.5B
@@ -39,5 +39,5 @@ calibration:
     split: [0, 20]
     tolerance_abs_accuracy: 0.02
 outputs:
-  bundle: runs/mentor_sps/<run-id>/sps_results_bundle.tar.gz
+  bundle: runs/experiment/<run-id>/results_bundle.tar.gz
   include_candidates_by_default: false

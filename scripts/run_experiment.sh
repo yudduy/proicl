@@ -3,18 +3,18 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Run the mentor-facing POLARIS SPS experiment.
+Run the POLARIS held-out experiment.
 
 Default run:
-  bash scripts/run_mentor_sps_experiment.sh
+  bash scripts/run_experiment.sh
 
 Useful overrides:
-  EVAL_END=30 ROLLOUT_BUDGET=2 bash scripts/run_mentor_sps_experiment.sh
-  DRY_RUN=1 bash scripts/run_mentor_sps_experiment.sh
+  EVAL_END=30 ROLLOUT_BUDGET=2 bash scripts/run_experiment.sh
+  DRY_RUN=1 bash scripts/run_experiment.sh
 
 Environment knobs:
-  RUN_ROOT                 Output series directory. Default: runs/mentor_sps
-  RUN_TAG                  Short tag inside the standardized run id. Default: sps-recovery
+  RUN_ROOT                 Output series directory. Default: runs/experiment
+  RUN_TAG                  Short tag inside the standardized run id. Default: heldout
   TRACKS                   Eval tracks. Default: boxnet acre game_of_life_halting graph_color_n12
   ARCHIVE_TRAIN_TRACKS     GEPA training tracks. Default: five in-distribution Reasoning Gym tasks
   ARCHIVE_HELDOUT_TRACKS   Held-out tracks for cross-family provenance. Default: TRACKS
@@ -57,8 +57,8 @@ SKIP_SPS_MATH500_CALIBRATION="${SKIP_SPS_MATH500_CALIBRATION:-0}"
 SMOKE_ONLY="${SMOKE_ONLY:-0}"
 INCLUDE_CANDIDATES="${INCLUDE_CANDIDATES:-0}"
 
-RUN_ROOT="${RUN_ROOT:-runs/mentor_sps}"
-RUN_TAG="${RUN_TAG:-sps-recovery}"
+RUN_ROOT="${RUN_ROOT:-runs/experiment}"
+RUN_TAG="${RUN_TAG:-heldout}"
 TRACKS="${TRACKS:-reasoning_gym_boxnet reasoning_gym_acre reasoning_gym_game_of_life_halting reasoning_gym_graph_color_n12}"
 ARCHIVE_TRAIN_TRACKS="${ARCHIVE_TRAIN_TRACKS:-reasoning_gym_family_relationships reasoning_gym_graph_color_n10 reasoning_gym_maze reasoning_gym_palindrome_generation reasoning_gym_letter_counting}"
 ARCHIVE_HELDOUT_TRACKS="${ARCHIVE_HELDOUT_TRACKS:-$TRACKS}"
@@ -316,7 +316,7 @@ if [[ -n "${VLLM_MAX_MODEL_LEN:-}" ]]; then
   MAIN_CMD+=(--vllm-max-model-len "$VLLM_MAX_MODEL_LEN")
 fi
 
-RUN_MARKER="$RUN_ROOT/.mentor_sps_launch_marker"
+RUN_MARKER="$RUN_ROOT/.launch_marker"
 if [[ "$DRY_RUN" != "1" ]]; then
   mkdir -p "$RUN_ROOT"
   : > "$RUN_MARKER"
@@ -346,7 +346,7 @@ else
     --require-passed
 fi
 
-PACKAGE_CMD=("$PY" scripts/package_sps_results.py --run-root "$PACKAGE_ROOT")
+PACKAGE_CMD=("$PY" scripts/package_results.py --run-root "$PACKAGE_ROOT")
 if [[ "$INCLUDE_CANDIDATES" == "1" ]]; then
   PACKAGE_CMD+=(--include-candidates)
 fi
@@ -354,4 +354,4 @@ run_cmd "${PACKAGE_CMD[@]}"
 
 echo
 echo "Run directory: $RUN_DIR"
-echo "Result bundle: $PACKAGE_ROOT/sps_results_bundle.tar.gz"
+echo "Result bundle: $PACKAGE_ROOT/results_bundle.tar.gz"

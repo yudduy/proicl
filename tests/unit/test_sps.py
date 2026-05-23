@@ -70,8 +70,8 @@ def test_sps_jackknife_matches_leave_one_out_bias_correction():
     assert sum(corrected) == pytest.approx(1.0)
 
 
-def test_sps_recovery_config_records_paper_contract():
-    text = (Path(__file__).resolve().parents[2] / "configs" / "sps_recovery_eval.yaml").read_text(
+def test_eval_config_records_sps_paper_contract():
+    text = (Path(__file__).resolve().parents[2] / "configs" / "eval.yaml").read_text(
         encoding="utf-8"
     )
 

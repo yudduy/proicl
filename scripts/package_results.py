@@ -1,4 +1,4 @@
-"""Package a mentor SPS run into a small, shareable result bundle."""
+"""Package a POLARIS experiment run into a small, shareable result bundle."""
 
 from __future__ import annotations
 
@@ -192,8 +192,8 @@ def _copy_top_level(full_root: Path, run_root: Path, bundle_root: Path) -> None:
         _copy_if_exists(manifest, dst)
     repo_root = Path(__file__).resolve().parents[1]
     for rel in [
-        "configs/sps_recovery_archive.yaml",
-        "configs/sps_recovery_eval.yaml",
+        "configs/archive_build.yaml",
+        "configs/eval.yaml",
     ]:
         _copy_if_exists(repo_root / rel, bundle_root / rel)
 
@@ -214,7 +214,7 @@ def main() -> None:
     if not (full_root / "runs").exists():
         raise SystemExit(f"could not find run artifacts under {full_root / 'runs'}")
 
-    out = (args.out or (run_root / "sps_results_bundle")).resolve()
+    out = (args.out or (run_root / "results_bundle")).resolve()
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
@@ -271,7 +271,7 @@ def main() -> None:
     _copy_top_level(full_root, run_root, out)
     _copy_cell_artifacts(full_root, out, include_candidates=args.include_candidates)
     manifest = {
-        "schema": "polaris_sps_results_bundle.v1",
+        "schema": "polaris_results_bundle.v1",
         "run_root": str(run_root),
         "full_root": str(full_root),
         "metrics_rows": len(metrics_rows),

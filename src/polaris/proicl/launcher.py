@@ -42,7 +42,7 @@ DEFAULT_SIGNAL_CONDITIONS: tuple[str, ...] = (
     "prorl_v2_greedy",
 )
 
-SPS_RECOVERY_CONDITIONS: tuple[str, ...] = (
+HELDOUT_EXPERIMENT_CONDITIONS: tuple[str, ...] = (
     "base_greedy",
     "sps_only",
     "gepa_sps_fixed",

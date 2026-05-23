@@ -71,7 +71,7 @@ PAPER_ALIGNED_SUSTAINED_TRACKS: tuple[str, ...] = (
     "reasoning_gym_boxnet",
 )
 
-SPS_RECOVERY_ARCHIVE_TRAIN_TRACKS: tuple[str, ...] = (
+HELDOUT_ARCHIVE_TRAIN_TRACKS: tuple[str, ...] = (
     "reasoning_gym_family_relationships",
     "reasoning_gym_graph_color_n10",
     "reasoning_gym_maze",
@@ -79,7 +79,7 @@ SPS_RECOVERY_ARCHIVE_TRAIN_TRACKS: tuple[str, ...] = (
     "reasoning_gym_letter_counting",
 )
 
-SPS_RECOVERY_EVAL_TRACKS: tuple[str, ...] = (
+HELDOUT_EVAL_TRACKS: tuple[str, ...] = (
     "reasoning_gym_boxnet",
     "reasoning_gym_acre",
     "reasoning_gym_game_of_life_halting",

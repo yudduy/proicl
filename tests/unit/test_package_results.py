@@ -8,8 +8,8 @@ from pathlib import Path
 
 def _load_packager():
     root = Path(__file__).resolve().parents[2]
-    path = root / "scripts" / "package_sps_results.py"
-    spec = importlib.util.spec_from_file_location("package_sps_results", path)
+    path = root / "scripts" / "package_results.py"
+    spec = importlib.util.spec_from_file_location("package_results", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -29,7 +29,7 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     )
 
 
-def test_package_sps_results_writes_small_bundle(tmp_path, monkeypatch):
+def test_package_results_writes_small_bundle(tmp_path, monkeypatch):
     packager = _load_packager()
     run_root = tmp_path / "run"
     full = run_root / "full"
@@ -78,14 +78,14 @@ def test_package_sps_results_writes_small_bundle(tmp_path, monkeypatch):
     monkeypatch.setattr(
         sys,
         "argv",
-        ["package_sps_results.py", "--run-root", str(run_root)],
+        ["package_results.py", "--run-root", str(run_root)],
     )
     packager.main()
 
-    bundle = run_root / "sps_results_bundle"
+    bundle = run_root / "results_bundle"
     assert (bundle / "summary" / "metrics.csv").exists()
     assert (bundle / "summary" / "per_problem_selected.csv").exists()
     assert (bundle / "summary" / "per_problem_agreement.csv").exists()
     assert (bundle / "runs" / "reasoning_gym_graph_color_n12" / "gepa_sps_fixed" / "shard-0" / "selected.jsonl").exists()
     assert not (bundle / "runs" / "reasoning_gym_graph_color_n12" / "gepa_sps_fixed" / "shard-0" / "candidates.jsonl").exists()
-    assert (run_root / "sps_results_bundle.tar.gz").exists()
+    assert (run_root / "results_bundle.tar.gz").exists()

@@ -18,7 +18,7 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   PYTHON_BIN="python"
 fi
 
-"$PYTHON_BIN" -m modal run scripts/modal_vllm_app.py::smoke_sps_recovery_one_problem_a100_80gb \
+"$PYTHON_BIN" -m modal run scripts/modal_vllm_app.py::smoke_experiment_one_problem_a100_80gb \
   --max-new-tokens "$MAX_NEW_TOKENS" \
   --sps-top-k "$SPS_TOP_K" \
   --sps-candidate-pool-size "$SPS_CANDIDATE_POOL_SIZE" \
