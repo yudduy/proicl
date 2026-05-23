@@ -178,6 +178,7 @@ def _copy_cell_artifacts(full_root: Path, bundle_root: Path, *, include_candidat
 
 def _copy_top_level(full_root: Path, run_root: Path, bundle_root: Path) -> None:
     for rel in [
+        "launch_config.json",
         "run_index.json",
         "events.jsonl",
         "proicl_signal_plan.json",
