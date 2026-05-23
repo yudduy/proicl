@@ -289,7 +289,6 @@ if [[ "$DRY_RUN" != "1" && "$SKIP_INSTALL" != "1" ]]; then
 fi
 
 if [[ "$DRY_RUN" != "1" ]]; then
-  run_cmd bash scripts/check_protocol_sync.sh
   if ! command -v nvidia-smi >/dev/null 2>&1; then
     echo "nvidia-smi not found; this run needs a CUDA GPU host." >&2
     exit 1

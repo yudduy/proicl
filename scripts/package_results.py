@@ -156,7 +156,6 @@ def _agreement_rows(selected_rows: list[dict[str, Any]]) -> list[dict[str, Any]]
 def _copy_cell_artifacts(full_root: Path, bundle_root: Path, *, include_candidates: bool) -> None:
     rels = [
         "metrics.json",
-        "costs.json",
         "selected.jsonl",
         "scores.jsonl",
         "preflight.json",

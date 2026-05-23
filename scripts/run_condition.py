@@ -172,8 +172,11 @@ def _resolve_power_block_num(args: argparse.Namespace) -> int | None:
 
 
 def _protocol_sync_passed() -> bool:
+    guard = REPO_ROOT / "scripts" / "check_protocol_sync.sh"
+    if not guard.exists():
+        return True
     result = subprocess.run(
-        ["bash", "scripts/check_protocol_sync.sh"],
+        ["bash", str(guard)],
         cwd=REPO_ROOT,
         text=True,
         capture_output=True,

@@ -209,10 +209,10 @@ def _setup_env(args: argparse.Namespace) -> dict[str, str]:
     if args.reflection_provider == "xai":
         env["XAI_REFLECTION_INITIAL_CAP_DOLLARS"] = str(args.xai_reflection_cap_dollars)
         env["XAI_REFLECTION_HARD_CAP_DOLLARS"] = str(args.xai_reflection_cap_dollars)
-    env.setdefault("POLARIS_RWS_COMMIT", vendored_commit(REPO_ROOT, "upstream/reasoning-with-sampling"))
-    env.setdefault("POLARIS_GEPA_COMMIT", vendored_commit(REPO_ROOT, "upstream/gepa"))
-    env.setdefault("POLARIS_EVALPLUS_COMMIT", vendored_commit(REPO_ROOT, "upstream/evalplus"))
-    env.setdefault("POLARIS_DC_COMMIT", vendored_commit(REPO_ROOT, "upstream/dynamic-cheatsheet"))
+    env.setdefault("PROICL_RWS_COMMIT", vendored_commit(REPO_ROOT, "upstream/reasoning-with-sampling"))
+    env.setdefault("PROICL_GEPA_COMMIT", vendored_commit(REPO_ROOT, "upstream/gepa"))
+    env.setdefault("PROICL_EVALPLUS_COMMIT", vendored_commit(REPO_ROOT, "upstream/evalplus"))
+    env.setdefault("PROICL_DC_COMMIT", vendored_commit(REPO_ROOT, "upstream/dynamic-cheatsheet"))
     return env
 
 
