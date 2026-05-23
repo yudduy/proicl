@@ -13,12 +13,40 @@ from typing import Any, Iterable
 
 from polaris.prorl_recovery.protocol import BASE_MODEL_KEY, PRORL_V2_MODEL_KEY
 from polaris.proicl.analysis import write_proicl_decomposition_by_track
+from polaris.proicl.protocol import (
+    ArchiveScope,
+    ForkSearchMode,
+    MemoryProtocol,
+    PAPER_ALIGNED_SUSTAINED_TRACKS,
+    ProICLConditionSpec,
+    RepairMode,
+    archive_scope_id,
+    validate_archive_scope_membership,
+)
 
 
-REASONING_GYM_TRACKS: tuple[str, ...] = (
-    "reasoning_gym_boxnet",
-    "reasoning_gym_graph_color",
-    "reasoning_gym_family_relationships",
+REASONING_GYM_TRACKS: tuple[str, ...] = PAPER_ALIGNED_SUSTAINED_TRACKS
+
+DEFAULT_SIGNAL_CONDITIONS: tuple[str, ...] = (
+    "base_greedy",
+    "bon_temp1",
+    "mcmc_only",
+    "mixed_alpha_mcmc",
+    "fork_search",
+    "gepa_only",
+    "gepa_mcmc",
+    "gepa_mcmc_repair",
+    "gepa_mcmc_fork_repair",
+    "gepa_mcmc_fork_repair_memory",
+    "gepa_mcmc_memory",
+    "prorl_v2_greedy",
+)
+
+HELDOUT_EXPERIMENT_CONDITIONS: tuple[str, ...] = (
+    "base_greedy",
+    "sps_only",
+    "gepa_sps_fixed",
+    "prorl_v2_greedy",
 )
 
 COMMON_ARTIFACTS: tuple[str, ...] = (
@@ -53,8 +81,17 @@ class LaunchCell:
     memory_build_id: str
     cache_path: str
     artifact_dir: str
+    archive_scope: str = ArchiveScope.CROSS_FAMILY_CURRICULUM.value
+    archive_scope_id: str = "none"
+    archive_train_tracks: tuple[str, ...] = field(default_factory=tuple)
+    archive_heldout_tracks: tuple[str, ...] = field(default_factory=tuple)
     uses_gepa_archive: bool = False
     uses_memory: bool = False
+    uses_repair: bool = False
+    uses_fork_search: bool = False
+    memory_protocol: str = "off"
+    repair_mode: str = "off"
+    fork_search_mode: str = "off"
     memory_store_path: str | None = None
     seed: int = 17
     extra_args: tuple[str, ...] = field(default_factory=tuple)
@@ -72,11 +109,20 @@ class LaunchCell:
             "rollout_budget": self.rollout_budget,
             "archive_path": self.archive_path,
             "archive_build_id": self.archive_build_id,
+            "archive_scope": self.archive_scope,
+            "archive_scope_id": self.archive_scope_id,
+            "archive_train_tracks": list(self.archive_train_tracks),
+            "archive_heldout_tracks": list(self.archive_heldout_tracks),
             "memory_build_id": self.memory_build_id,
             "cache_path": self.cache_path,
             "artifact_dir": self.artifact_dir,
             "uses_gepa_archive": self.uses_gepa_archive,
             "uses_memory": self.uses_memory,
+            "uses_repair": self.uses_repair,
+            "uses_fork_search": self.uses_fork_search,
+            "memory_protocol": self.memory_protocol,
+            "repair_mode": self.repair_mode,
+            "fork_search_mode": self.fork_search_mode,
             "memory_store_path": self.memory_store_path,
             "seed": self.seed,
             "extra_args": list(self.extra_args),
@@ -143,79 +189,111 @@ def build_signal_cells(
     num_shards: int,
     memory_num_shards: int,
     seed: int = 17,
+    archive_scope: ArchiveScope | str = ArchiveScope.WITHIN_FAMILY,
+    archive_train_tracks: Iterable[str] | None = None,
+    archive_heldout_tracks: Iterable[str] | None = None,
+    conditions: Iterable[str] | None = None,
 ) -> list[LaunchCell]:
     if memory_num_shards != 1:
         raise ValueError(
             "ProICL memory cells must use memory_num_shards=1 so a track has "
             "one serialized verifier-gated curriculum store."
         )
-    cells: list[LaunchCell] = []
-    specs = (
-        ("base_greedy", "greedy", BASE_MODEL_KEY, "direct", 1, False, False),
-        ("mcmc_only", "single_prompt_power", BASE_MODEL_KEY, "direct", rollout_budget, False, False),
-        ("gepa_only", "gepa_only", BASE_MODEL_KEY, "gepa", rollout_budget, True, False),
-        ("gepa_mcmc", "proicl_gepa_mcmc", BASE_MODEL_KEY, "gepa", rollout_budget, True, False),
-        (
-            "gepa_mcmc_memory",
-            "proicl_gepa_mcmc_memory",
-            BASE_MODEL_KEY,
-            "gepa",
-            rollout_budget,
-            True,
-            True,
-        ),
-        ("prorl_v2_greedy", "greedy", PRORL_V2_MODEL_KEY, "direct", 1, False, False),
+    track_tuple = tuple(tracks)
+    archive_scope = ArchiveScope(archive_scope)
+    train_tracks = tuple(archive_train_tracks or track_tuple)
+    heldout_tracks = tuple(archive_heldout_tracks or track_tuple)
+    validate_archive_scope_membership(
+        archive_scope=archive_scope,
+        train_tracks=train_tracks,
+        heldout_tracks=heldout_tracks,
     )
-    for track in tracks:
+    scope_id = archive_scope_id(archive_scope, train_tracks)
+    specs = (
+        ProICLConditionSpec("base_greedy", "greedy", BASE_MODEL_KEY, "direct", "greedy", "greedy"),
+        ProICLConditionSpec("bon_temp1", "bon_temp1", BASE_MODEL_KEY, "direct", "matched", "bon_temp1"),
+        ProICLConditionSpec("sps_only", "single_prompt_power", BASE_MODEL_KEY, "direct", "matched", "fixed_alpha_4", uses_power_sampling=True),
+        ProICLConditionSpec("mcmc_only", "single_prompt_power", BASE_MODEL_KEY, "direct", "matched", "fixed_alpha_4", uses_power_sampling=True),
+        ProICLConditionSpec("mixed_alpha_mcmc", "mixed_alpha_mcmc", BASE_MODEL_KEY, "direct", "matched", "mixed_alpha_4_1", uses_power_sampling=True),
+        ProICLConditionSpec("fork_search", "fork_search", BASE_MODEL_KEY, "direct", "matched", "bon_temp1", uses_fork_search=True, fork_search_mode=ForkSearchMode.ENTROPY_GATED),
+        ProICLConditionSpec("gepa_only", "gepa_only", BASE_MODEL_KEY, "gepa", "matched", "bon_temp1", uses_gepa_archive=True),
+        ProICLConditionSpec("gepa_sps_fixed", "full_archive_fixed", BASE_MODEL_KEY, "gepa", "matched", "fixed_alpha_4", uses_power_sampling=True, uses_gepa_archive=True),
+        ProICLConditionSpec("gepa_mcmc", "proicl_gepa_mcmc", BASE_MODEL_KEY, "gepa", "matched", "mixed_alpha_4_1", uses_power_sampling=True, uses_gepa_archive=True),
+        ProICLConditionSpec("gepa_mcmc_repair", "proicl_gepa_mcmc_repair", BASE_MODEL_KEY, "gepa", "matched", "mixed_alpha_4_1", uses_power_sampling=True, uses_gepa_archive=True, uses_repair=True, repair_mode=RepairMode.VERIFIER_GUIDED),
+        ProICLConditionSpec("gepa_mcmc_fork_repair", "proicl_gepa_mcmc_fork_repair", BASE_MODEL_KEY, "gepa", "matched", "mixed_alpha_4_1", uses_power_sampling=True, uses_gepa_archive=True, uses_repair=True, uses_fork_search=True, repair_mode=RepairMode.VERIFIER_GUIDED, fork_search_mode=ForkSearchMode.ENTROPY_GATED),
+        ProICLConditionSpec("gepa_mcmc_fork_repair_memory", "proicl_gepa_mcmc_fork_repair_memory", BASE_MODEL_KEY, "gepa", "matched", "mixed_alpha_4_1", uses_power_sampling=True, uses_gepa_archive=True, uses_memory=True, uses_repair=True, uses_fork_search=True, memory_mode="distilled_strategies", memory_protocol=MemoryProtocol.FROZEN_DEV, repair_mode=RepairMode.VERIFIER_GUIDED, fork_search_mode=ForkSearchMode.ENTROPY_GATED),
+        ProICLConditionSpec("gepa_mcmc_memory", "proicl_gepa_mcmc_memory", BASE_MODEL_KEY, "gepa", "matched", "mixed_alpha_4_1", uses_power_sampling=True, uses_gepa_archive=True, uses_memory=True, memory_mode="distilled_strategies", memory_protocol=MemoryProtocol.ONLINE, preliminary=True),
+        ProICLConditionSpec("prorl_v2_greedy", "greedy", PRORL_V2_MODEL_KEY, "direct", "greedy", "greedy", slow_weight_reference=True),
+    )
+    spec_by_key = {spec.key: spec for spec in specs}
+    condition_tuple = tuple(conditions or DEFAULT_SIGNAL_CONDITIONS)
+    unknown_conditions = sorted(set(condition_tuple) - set(spec_by_key))
+    if unknown_conditions:
+        raise ValueError("unknown ProICL signal conditions: " + ", ".join(unknown_conditions))
+    cells: list[LaunchCell] = []
+    for track in track_tuple:
         direct_archive = root / "archives" / track / "direct.json"
-        gepa_archive = root / "archives" / "proicl_cross_task_gepa" / "archive.json"
-        for (
-            proicl_condition,
-            runtime_condition,
-            model_key,
-            archive_kind,
-            budget,
-            uses_gepa,
-            uses_memory,
-        ) in specs:
-            shards = memory_num_shards if uses_memory else num_shards
+        gepa_archive = root / "archives" / scope_id / "archive.json"
+        for proicl_condition in condition_tuple:
+            spec = spec_by_key[proicl_condition]
+            budget = 1 if spec.budget_role == "greedy" else rollout_budget
+            shards = memory_num_shards if spec.uses_memory else num_shards
             for shard_id in range(shards):
-                archive_path = gepa_archive if archive_kind == "gepa" else direct_archive
+                archive_path = gepa_archive if spec.archive_kind == "gepa" else direct_archive
                 memory_path = (
-                    root / "memory" / track / f"{proicl_condition}.sqlite"
-                    if uses_memory
+                    root / "memory" / track / f"{spec.key}.sqlite"
+                    if spec.uses_memory
                     else None
                 )
-                extra: tuple[str, ...] = ()
-                if uses_memory:
-                    extra = ("--memory-mode", "distilled_strategies", "--admit-memory", "--online-memory")
+                extra_parts: list[str] = []
+                if spec.uses_memory:
+                    extra_parts.extend(["--memory-mode", spec.memory_mode])
+                if spec.memory_protocol == MemoryProtocol.ONLINE:
+                    extra_parts.extend(["--admit-memory", "--online-memory"])
+                if spec.uses_repair:
+                    extra_parts.append("--enable-repair")
+                if spec.uses_fork_search:
+                    extra_parts.append("--enable-fork-search")
                 cells.append(
                     LaunchCell(
-                        proicl_condition=proicl_condition,
-                        runtime_condition=runtime_condition,
-                        condition=runtime_condition,
+                        proicl_condition=spec.key,
+                        runtime_condition=spec.runtime_condition,
+                        condition=spec.runtime_condition,
                         track=track,
-                        model_key=model_key,
+                        model_key=spec.model_key,
                         split=split,
                         shard_id=shard_id,
                         num_shards=shards,
                         rollout_budget=budget,
                         archive_path=str(archive_path),
-                        archive_build_id="proicl-cross-task-gepa" if uses_gepa else "none",
-                        memory_build_id=f"proicl-memory-{track}" if uses_memory else "none",
+                        archive_build_id=scope_id if spec.uses_gepa_archive else "none",
+                        archive_scope=archive_scope.value,
+                        archive_scope_id=scope_id,
+                        archive_train_tracks=train_tracks if spec.uses_gepa_archive else (),
+                        archive_heldout_tracks=heldout_tracks if spec.uses_gepa_archive else (),
+                        memory_build_id=(
+                            f"proicl-memory-{spec.memory_protocol.value}-{track}"
+                            if spec.uses_memory
+                            else "none"
+                        ),
                         cache_path=str(
                             root
                             / "trajectory_cache"
-                            / f"{track}-{proicl_condition}-shard-{shard_id}.sqlite"
+                            / f"{track}-{spec.key}-shard-{shard_id}.sqlite"
                         ),
                         artifact_dir=str(
-                            root / "runs" / track / proicl_condition / f"shard-{shard_id}"
+                            root / "runs" / track / spec.key / f"shard-{shard_id}"
                         ),
-                        uses_gepa_archive=uses_gepa,
-                        uses_memory=uses_memory,
+                        uses_gepa_archive=spec.uses_gepa_archive,
+                        uses_memory=spec.uses_memory,
+                        uses_repair=spec.uses_repair,
+                        uses_fork_search=spec.uses_fork_search,
+                        memory_protocol=spec.memory_protocol.value,
+                        repair_mode=spec.repair_mode.value,
+                        fork_search_mode=spec.fork_search_mode.value,
                         memory_store_path=str(memory_path) if memory_path else None,
                         seed=seed,
-                        extra_args=extra,
+                        extra_args=tuple(extra_parts),
                     )
                 )
     return cells
@@ -225,6 +303,10 @@ def required_artifacts(cell: LaunchCell) -> tuple[str, ...]:
     extra: list[str] = []
     if cell.uses_gepa_archive or cell.uses_memory:
         extra.append("archive_build_manifest.json")
+    if cell.uses_repair:
+        extra.append("repair_traces.jsonl")
+    if cell.uses_fork_search:
+        extra.append("fork_traces.jsonl")
     if cell.uses_memory:
         extra.extend(["memory.sqlite", "memory_events.jsonl"])
     return COMMON_ARTIFACTS + tuple(extra)
@@ -258,20 +340,36 @@ def run_condition_command(
     run_kind: str,
     run_stage: str,
     max_new_tokens: int,
+    power_sampler: str = "mcmc",
     mcmc_steps: int | None = None,
     mcmc_block_num: int | None = None,
+    sps_top_k: int = 8,
+    sps_candidate_pool_size: int = 8,
+    sps_rollouts_per_candidate: int = 8,
+    sps_rollout_horizon: int | None = None,
     vllm_dtype: str = "float32",
     vllm_model_impl: str = "transformers",
     vllm_gpu_memory_utilization: float = 0.85,
     vllm_max_model_len: int | None = None,
     vllm_scoring_mode: str = "forced_decode_v0",
     vllm_parity_artifact: str | None = None,
+    vllm_enable_prefix_caching: bool = True,
 ) -> list[str]:
-    if (
-        cell.proicl_condition
-        in {"mcmc_only", "gepa_only", "gepa_mcmc", "gepa_mcmc_memory"}
-        and cell.model_key != BASE_MODEL_KEY
-    ):
+    frozen_conditions = {
+        "bon_temp1",
+        "sps_only",
+        "mcmc_only",
+        "mixed_alpha_mcmc",
+        "fork_search",
+        "gepa_only",
+        "gepa_sps_fixed",
+        "gepa_mcmc",
+        "gepa_mcmc_repair",
+        "gepa_mcmc_fork_repair",
+        "gepa_mcmc_fork_repair_memory",
+        "gepa_mcmc_memory",
+    }
+    if cell.proicl_condition in frozen_conditions and cell.model_key != BASE_MODEL_KEY:
         raise ValueError(
             "ProICL frozen-base conditions must use the base model, not "
             f"{cell.model_key!r}"
@@ -304,6 +402,8 @@ def run_condition_command(
         "1.0",
         "--max-new-tokens",
         str(max_new_tokens),
+        "--power-sampler",
+        power_sampler,
         "--polaris-source-hash",
         polaris_source_hash,
         "--preregistration-anchor",
@@ -340,6 +440,18 @@ def run_condition_command(
         cmd.extend(["--mcmc-steps", str(mcmc_steps)])
     if mcmc_block_num is not None:
         cmd.extend(["--mcmc-block-num", str(mcmc_block_num)])
+    cmd.extend(
+        [
+            "--sps-top-k",
+            str(sps_top_k),
+            "--sps-candidate-pool-size",
+            str(sps_candidate_pool_size),
+            "--sps-rollouts-per-candidate",
+            str(sps_rollouts_per_candidate),
+        ]
+    )
+    if sps_rollout_horizon is not None:
+        cmd.extend(["--sps-rollout-horizon", str(sps_rollout_horizon)])
     if local_files_only:
         cmd.append("--local-files-only")
     if backend == "vllm":
@@ -359,6 +471,8 @@ def run_condition_command(
             cmd.extend(["--vllm-max-model-len", str(vllm_max_model_len)])
         if vllm_parity_artifact is not None:
             cmd.extend(["--vllm-parity-artifact", vllm_parity_artifact])
+        if not vllm_enable_prefix_caching:
+            cmd.append("--no-vllm-prefix-caching")
     if cell.memory_store_path is not None:
         cmd.extend(["--memory-store", cell.memory_store_path])
     cmd.extend(cell.extra_args)
@@ -379,14 +493,20 @@ def run_cells(
     run_kind: str,
     run_stage: str,
     max_new_tokens: int,
+    power_sampler: str = "mcmc",
     mcmc_steps: int | None = None,
     mcmc_block_num: int | None = None,
+    sps_top_k: int = 8,
+    sps_candidate_pool_size: int = 8,
+    sps_rollouts_per_candidate: int = 8,
+    sps_rollout_horizon: int | None = None,
     vllm_dtype: str = "float32",
     vllm_model_impl: str = "transformers",
     vllm_gpu_memory_utilization: float = 0.85,
     vllm_max_model_len: int | None = None,
     vllm_scoring_mode: str = "forced_decode_v0",
     vllm_parity_artifact: str | None = None,
+    vllm_enable_prefix_caching: bool = True,
     stop_on_failure: bool = True,
 ) -> None:
     if not gpus:
@@ -419,14 +539,20 @@ def run_cells(
                 run_kind=run_kind,
                 run_stage=run_stage,
                 max_new_tokens=max_new_tokens,
+                power_sampler=power_sampler,
                 mcmc_steps=mcmc_steps,
                 mcmc_block_num=mcmc_block_num,
+                sps_top_k=sps_top_k,
+                sps_candidate_pool_size=sps_candidate_pool_size,
+                sps_rollouts_per_candidate=sps_rollouts_per_candidate,
+                sps_rollout_horizon=sps_rollout_horizon,
                 vllm_dtype=vllm_dtype,
                 vllm_model_impl=vllm_model_impl,
                 vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
                 vllm_max_model_len=vllm_max_model_len,
                 vllm_scoring_mode=vllm_scoring_mode,
                 vllm_parity_artifact=vllm_parity_artifact,
+                vllm_enable_prefix_caching=vllm_enable_prefix_caching,
             )
             env = os.environ.copy()
             env["CUDA_VISIBLE_DEVICES"] = gpu

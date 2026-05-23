@@ -52,3 +52,7 @@ runs/*
 # Reference clones are documented, not committed as nested repos.
 upstream/*
 !upstream/README.md
+
+# Keep the public surface minimal: only README.md is tracked as Markdown docs.
+*.md
+!/README.md

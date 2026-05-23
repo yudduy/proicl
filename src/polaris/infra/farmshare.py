@@ -151,7 +151,7 @@ def env_commands(remote_root: str = "/scratch/users/$USER/polaris") -> list[str]
         (
             f"micromamba run -p {remote_root}/envs/polaris "
             "python -m pip install -e '.[gepa_reflection]' vllm==0.9.2 "
-            "reasoning-gym accelerate pytest pyarrow"
+            "reasoning-gym==0.1.25 accelerate pytest pyarrow"
         ),
         (
             f"micromamba run -p {remote_root}/envs/polaris "

@@ -287,6 +287,7 @@ def test_accuracy_is_one_when_all_correct(tmp_path):
         out_dir=tmp_path / "fc", condition="full_archive_fixed", sampler=sampler, **_KW
     )
     assert metrics["accuracy"] == 1.0
+    assert metrics["mean_selected_score"] == 1.0
 
 
 def test_accuracy_is_zero_when_all_wrong(tmp_path):
@@ -295,6 +296,7 @@ def test_accuracy_is_zero_when_all_wrong(tmp_path):
         out_dir=tmp_path / "fc", condition="full_archive_fixed", sampler=sampler, **_KW
     )
     assert metrics["accuracy"] == 0.0
+    assert metrics["mean_selected_score"] == 0.0
 
 
 def test_manifest_records_condition_and_alpha_policy(tmp_path):

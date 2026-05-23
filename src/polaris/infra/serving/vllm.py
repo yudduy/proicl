@@ -34,6 +34,7 @@ from polaris.config import (
     SEED,
     estimate_cost,
 )
+from polaris.core.sps import SPSConfig, sps_candidate_probabilities
 from polaris.infra.serving import ScoreBatch
 
 VLLM_SCORING_MODES = ("forced_decode_v0", "native_segment")
@@ -868,6 +869,288 @@ class VLLMGenerator:
                     acceptance_ratio=(
                         state.acceptances / state.attempts if state.attempts else 0.0
                     ),
+                    token_ids=state.gen,
+                    logprobs_norm=state.log_probs_norm,
+                    logprobs_unnorm=state.log_probs_unnorm,
+                )
+            )
+        return generations
+
+    def generate_sps_power(
+        self,
+        prompt_text: str,
+        *,
+        temperature: float = PROPOSAL_TEMPERATURE,
+        max_new_tokens: int = MAX_NEW_TOKENS,
+        block_num: int = MCMC_BLOCK_NUM,
+        top_k: int = 8,
+        candidate_pool_size: int = 8,
+        rollouts_per_candidate: int = 8,
+        rollout_horizon: int | None = None,
+        seed_base: int | None = None,
+        seed_offset: int = 0,
+    ) -> Generation:
+        return self.generate_sps_power_batch(
+            [prompt_text],
+            temperature=temperature,
+            max_new_tokens=max_new_tokens,
+            block_num=block_num,
+            top_k=top_k,
+            candidate_pool_size=candidate_pool_size,
+            rollouts_per_candidate=rollouts_per_candidate,
+            rollout_horizon=rollout_horizon,
+            seed_base=seed_base,
+            seed_offsets=[seed_offset],
+        )[0]
+
+    def generate_sps_power_batch(
+        self,
+        prompt_texts: list[str],
+        *,
+        temperature: float = PROPOSAL_TEMPERATURE,
+        max_new_tokens: int = MAX_NEW_TOKENS,
+        block_num: int = MCMC_BLOCK_NUM,
+        top_k: int = 8,
+        candidate_pool_size: int = 8,
+        rollouts_per_candidate: int = 8,
+        rollout_horizon: int | None = None,
+        seed_base: int | None = None,
+        seed_offsets: list[int] | None = None,
+    ) -> list[Generation]:
+        """Approximate power sampling with block-level SPS lookahead.
+
+        This implements the batched/block variant of Ji et al. (2026) on top of
+        the existing vLLM sampled-segment scoring path. Candidate blocks and
+        future rollouts are sampled from the base distribution, scored under the
+        base model, then jackknife-corrected into a finite-candidate
+        approximation to the alpha-power distribution.
+        """
+        if not prompt_texts:
+            return []
+        if block_num <= 0:
+            raise ValueError(f"block_num must be > 0, got {block_num}")
+        if max_new_tokens < 0:
+            raise ValueError(f"max_new_tokens must be >= 0, got {max_new_tokens}")
+        if top_k <= 0:
+            raise ValueError(f"top_k must be > 0, got {top_k}")
+        if candidate_pool_size <= 0:
+            raise ValueError(
+                f"candidate_pool_size must be > 0, got {candidate_pool_size}"
+            )
+        if rollouts_per_candidate < 0:
+            raise ValueError(
+                f"rollouts_per_candidate must be >= 0, got {rollouts_per_candidate}"
+            )
+        if seed_offsets is None:
+            offsets = list(range(len(prompt_texts)))
+        else:
+            offsets = [int(x) for x in seed_offsets]
+            if len(offsets) != len(prompt_texts):
+                raise ValueError("seed_offsets length must match prompt_texts length")
+
+        alpha = 1.0 / float(temperature)
+        if alpha <= 1.0:
+            return self.generate_low_temp_batch(
+                prompt_texts,
+                temperature=1.0,
+                max_new_tokens=max_new_tokens,
+                seed_base=seed_base,
+                seed_offsets=offsets,
+            )
+
+        base_seed = self.seed if seed_base is None else int(seed_base)
+        config = SPSConfig(
+            top_k=top_k,
+            candidate_pool_size=max(candidate_pool_size, top_k),
+            rollouts_per_candidate=rollouts_per_candidate,
+            rollout_horizon=rollout_horizon,
+        )
+        prefix_ids_batch = [self._encode(prompt_text) for prompt_text in prompt_texts]
+        block_base, block_remainder = divmod(max_new_tokens, block_num)
+        block_sizes = [
+            block_base + (1 if block_idx < block_remainder else 0)
+            for block_idx in range(block_num)
+        ]
+        states = [
+            _MCMCChainState(
+                prompt_text=prompt_text,
+                prefix_ids=prefix_ids,
+                gen=[],
+                log_probs_norm=[],
+                log_probs_unnorm=[],
+                rng=random.Random(base_seed + offsets[chain_idx] * 1_000_003),
+            )
+            for chain_idx, (prompt_text, prefix_ids) in enumerate(
+                zip(prompt_texts, prefix_ids_batch)
+            )
+        ]
+        dollars_by_state = [0.0 for _ in states]
+        started = time.monotonic()
+
+        for block_idx, block_size in enumerate(block_sizes):
+            if block_size <= 0:
+                continue
+            active_indices = [
+                chain_idx
+                for chain_idx, state in enumerate(states)
+                if state.active and len(state.gen) < max_new_tokens
+            ]
+            if not active_indices:
+                break
+
+            candidate_prefixes: list[list[int]] = []
+            candidate_meta: list[tuple[int, int]] = []
+            candidate_offsets: list[int] = []
+            for chain_idx in active_indices:
+                state = states[chain_idx]
+                remaining = max_new_tokens - len(state.gen)
+                length = min(block_size, remaining)
+                if length <= 0:
+                    state.active = False
+                    continue
+                for cand_idx in range(config.candidate_pool_size):
+                    candidate_prefixes.append(state.prefix_ids + state.gen)
+                    candidate_meta.append((chain_idx, cand_idx))
+                    candidate_offsets.append(
+                        20_000_003
+                        + (block_idx + 1) * 1_000_003
+                        + cand_idx * 10_007
+                        + offsets[chain_idx]
+                    )
+            if not candidate_prefixes:
+                continue
+
+            candidate_rows = self._sample_ids_with_scores_batch(
+                candidate_prefixes,
+                temperature=1.0,
+                max_new_tokens=block_size,
+                seed_offsets=candidate_offsets,
+                seed_base=base_seed,
+                exact_length=True,
+            )
+            grouped: dict[int, list[dict[str, Any]]] = {idx: [] for idx in active_indices}
+            for prefix, (chain_idx, cand_idx), (ids, norm, unnorm) in zip(
+                candidate_prefixes, candidate_meta, candidate_rows
+            ):
+                grouped[chain_idx].append(
+                    {
+                        "candidate_index": cand_idx,
+                        "ids": ids,
+                        "norm": norm,
+                        "unnorm": unnorm,
+                        "logp": float(sum(norm)),
+                    }
+                )
+                dollars_by_state[chain_idx] += estimate_cost(
+                    len(prefix), len(ids)
+                ).dollars
+
+            selected_by_chain: dict[int, list[dict[str, Any]]] = {}
+            rollout_prefixes: list[list[int]] = []
+            rollout_meta: list[tuple[int, int, int]] = []
+            rollout_offsets: list[int] = []
+            rollout_lengths: list[int] = []
+            for chain_idx in active_indices:
+                state = states[chain_idx]
+                candidates = sorted(
+                    grouped[chain_idx],
+                    key=lambda row: row["logp"],
+                    reverse=True,
+                )[: config.top_k]
+                selected_by_chain[chain_idx] = candidates
+                remaining_after_candidate = max_new_tokens - (
+                    len(state.gen) + len(candidates[0]["ids"]) if candidates else len(state.gen)
+                )
+                horizon = min(
+                    config.rollout_horizon
+                    if config.rollout_horizon is not None
+                    else block_size,
+                    max(0, remaining_after_candidate),
+                )
+                if horizon <= 0 or config.rollouts_per_candidate == 0:
+                    continue
+                for cand_pos, candidate in enumerate(candidates):
+                    prefix = state.prefix_ids + state.gen + candidate["ids"]
+                    for rollout_idx in range(config.rollouts_per_candidate):
+                        rollout_prefixes.append(prefix)
+                        rollout_meta.append((chain_idx, cand_pos, rollout_idx))
+                        rollout_lengths.append(horizon)
+                        rollout_offsets.append(
+                            40_000_009
+                            + (block_idx + 1) * 1_000_003
+                            + cand_pos * 10_007
+                            + rollout_idx * 101
+                            + offsets[chain_idx]
+                        )
+
+            rollout_logps: dict[tuple[int, int], list[float]] = {}
+            if rollout_prefixes:
+                rollout_rows = self._sample_ids_with_scores_batch(
+                    rollout_prefixes,
+                    temperature=1.0,
+                    max_new_tokens=rollout_lengths,
+                    seed_offsets=rollout_offsets,
+                    seed_base=base_seed,
+                    exact_length=True,
+                )
+                for prefix, (chain_idx, cand_pos, _), (ids, norm, _) in zip(
+                    rollout_prefixes, rollout_meta, rollout_rows
+                ):
+                    rollout_logps.setdefault((chain_idx, cand_pos), []).append(
+                        float(sum(norm))
+                    )
+                    dollars_by_state[chain_idx] += estimate_cost(
+                        len(prefix), len(ids)
+                    ).dollars
+
+            eos_id = self.tokenizer.eos_token_id
+            for chain_idx, candidates in selected_by_chain.items():
+                if not candidates:
+                    states[chain_idx].active = False
+                    continue
+                probs = sps_candidate_probabilities(
+                    candidate_logps=[row["logp"] for row in candidates],
+                    rollout_logps_by_candidate=[
+                        rollout_logps.get((chain_idx, cand_pos), [])
+                        for cand_pos in range(len(candidates))
+                    ],
+                    alpha=alpha,
+                    jackknife=config.jackknife,
+                )
+                u = states[chain_idx].rng.random()
+                cumulative = 0.0
+                chosen_pos = len(probs) - 1
+                for pos, prob in enumerate(probs):
+                    cumulative += prob
+                    if u <= cumulative:
+                        chosen_pos = pos
+                        break
+                chosen = candidates[chosen_pos]
+                state = states[chain_idx]
+                state.gen.extend(chosen["ids"])
+                state.log_probs_norm.extend(chosen["norm"])
+                state.log_probs_unnorm.extend(chosen["unnorm"])
+                if eos_id in state.gen:
+                    eos_idx = state.gen.index(eos_id) + 1
+                    state.gen = state.gen[:eos_idx]
+                    state.log_probs_norm = state.log_probs_norm[:eos_idx]
+                    state.log_probs_unnorm = state.log_probs_unnorm[:eos_idx]
+                    state.active = False
+
+        elapsed = time.monotonic() - started
+        per_candidate_wall = elapsed / len(prompt_texts)
+        generations: list[Generation] = []
+        for state, dollars in zip(states, dollars_by_state):
+            generations.append(
+                Generation(
+                    generation=self._decode(state.gen),
+                    prompt_text=state.prompt_text,
+                    response_contains_prompt=False,
+                    prompt_token_count=len(state.prefix_ids),
+                    generation_token_count=len(state.gen),
+                    wall_clock_seconds=per_candidate_wall,
+                    estimated_dollar_cost=dollars,
+                    acceptance_ratio=None,
                     token_ids=state.gen,
                     logprobs_norm=state.log_probs_norm,
                     logprobs_unnorm=state.log_probs_unnorm,

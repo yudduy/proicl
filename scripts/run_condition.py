@@ -29,7 +29,23 @@ def _parse_args() -> argparse.Namespace:
             "gpqa_diamond",
             "reasoning_gym_boxnet",
             "reasoning_gym_graph_color",
+            "reasoning_gym_graph_color_n5",
+            "reasoning_gym_graph_color_n8",
+            "reasoning_gym_graph_color_n10",
+            "reasoning_gym_graph_color_n12",
+            "reasoning_gym_graph_color_n13",
+            "reasoning_gym_graph_color_n14",
+            "reasoning_gym_graph_color_n15",
+            "reasoning_gym_graph_color_n16",
+            "reasoning_gym_graph_color_n18",
+            "reasoning_gym_graph_color_n20",
             "reasoning_gym_family_relationships",
+            "reasoning_gym_acre",
+            "reasoning_gym_game_of_life_halting",
+            "reasoning_gym_maze",
+            "reasoning_gym_palindrome_generation",
+            "reasoning_gym_palindrome",
+            "reasoning_gym_letter_counting",
         ],
     )
     parser.add_argument("--model-key", required=True)
@@ -47,6 +63,28 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=None)
     parser.add_argument("--mcmc-steps", type=int, default=None)
     parser.add_argument("--mcmc-block-num", type=int, default=None)
+    parser.add_argument(
+        "--power-block-num",
+        type=int,
+        default=None,
+        help="Public alias for the number of power-sampling blocks.",
+    )
+    parser.add_argument(
+        "--sps-block-num",
+        type=int,
+        default=None,
+        help="SPS-facing alias for --power-block-num.",
+    )
+    parser.add_argument("--sps-top-k", type=int, default=8)
+    parser.add_argument("--sps-candidate-pool-size", type=int, default=8)
+    parser.add_argument("--sps-rollouts-per-candidate", type=int, default=8)
+    parser.add_argument("--sps-rollout-horizon", type=int, default=None)
+    parser.add_argument(
+        "--power-sampler",
+        choices=["mcmc", "sps"],
+        default="mcmc",
+        help="Power-sampling implementation for alpha>1 candidates.",
+    )
     parser.add_argument("--shard-id", type=int, default=None)
     parser.add_argument("--num-shards", type=int, default=None)
     parser.add_argument("--trajectory-cache", type=Path, default=None)
@@ -58,6 +96,8 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--admit-memory", action="store_true")
     parser.add_argument("--online-memory", action="store_true")
+    parser.add_argument("--enable-repair", action="store_true")
+    parser.add_argument("--enable-fork-search", action="store_true")
     parser.add_argument("--archive-build-id", default=None)
     parser.add_argument("--memory-build-id", default=None)
     parser.add_argument(
@@ -91,6 +131,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--vllm-gpu-memory-utilization", type=float, default=0.85)
     parser.add_argument("--vllm-max-model-len", type=int, default=None)
     parser.add_argument(
+        "--no-vllm-prefix-caching",
+        action="store_true",
+        help="Disable vLLM prefix caching for GPUs/backends where prefix-prefill is unstable.",
+    )
+    parser.add_argument(
         "--vllm-scoring-mode",
         choices=["forced_decode_v0", "native_segment"],
         default="forced_decode_v0",
@@ -102,6 +147,22 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--gepa-commit", default="")
     parser.add_argument("--dc-commit", default="")
     return parser.parse_args()
+
+
+def _resolve_power_block_num(args: argparse.Namespace) -> int | None:
+    supplied = [
+        value
+        for value in (args.mcmc_block_num, args.power_block_num, args.sps_block_num)
+        if value is not None
+    ]
+    if not supplied:
+        return None
+    if len(set(supplied)) != 1:
+        raise SystemExit(
+            "--mcmc-block-num, --power-block-num, and --sps-block-num are aliases; "
+            "provide at most one value or use the same value for each."
+        )
+    return supplied[0]
 
 
 def _protocol_sync_passed() -> bool:
@@ -147,11 +208,16 @@ def _condition_requires_vllm_calibration(condition: str) -> bool:
         "polaris_full_verified_memory",
         "proicl_gepa_mcmc",
         "proicl_gepa_mcmc_memory",
+        "mixed_alpha_mcmc",
+        "proicl_gepa_mcmc_repair",
+        "proicl_gepa_mcmc_fork_repair",
+        "proicl_gepa_mcmc_fork_repair_memory",
     }
 
 
 def main() -> None:
     args = _parse_args()
+    power_block_num = _resolve_power_block_num(args)
 
     from polaris.infra.preflight import (
         PaidRunPreflight,
@@ -166,6 +232,8 @@ def main() -> None:
 
     validate_model_for_track(args.model_key, args.track)
     validate_condition_for_track(args.condition, args.track)
+    if args.power_sampler == "sps" and args.backend != "vllm":
+        raise SystemExit("power_sampler=sps currently requires --backend vllm")
     model = resolve_model(args.model_key)
     model_revision = args.model_revision or model.revision
     protocol_sync = _protocol_sync_passed()
@@ -199,6 +267,7 @@ def main() -> None:
         "model_revision_commit": model.revision_commit,
         "model_artifact_etags": model.artifact_etags or {},
         "backend": args.backend,
+        "power_sampler": args.power_sampler,
         "vllm_scoring_mode": args.vllm_scoring_mode if args.backend == "vllm" else None,
         "vllm_calibration_required": vllm_calibration_required
         if args.backend == "vllm"
@@ -231,6 +300,7 @@ def main() -> None:
             preflight_report["model_revision_commit"] = model.revision_commit
             preflight_report["model_artifact_etags"] = model.artifact_etags or {}
             preflight_report["protocol_sync_passed"] = protocol_sync
+            preflight_report["power_sampler"] = args.power_sampler
             preflight_report["vllm_scoring_mode"] = (
                 args.vllm_scoring_mode if args.backend == "vllm" else None
             )
@@ -293,6 +363,7 @@ def main() -> None:
             max_model_len=args.vllm_max_model_len,
             local_files_only=args.local_files_only,
             scoring_mode=args.vllm_scoring_mode,
+            enable_prefix_caching=not args.no_vllm_prefix_caching,
             parity_artifact_path=str(vllm_parity_artifact_for_condition)
             if vllm_parity_artifact_for_condition is not None
             else None,
@@ -369,6 +440,8 @@ def main() -> None:
             memory_mode=args.memory_mode,
             admit_memory=args.admit_memory,
             online_memory=args.online_memory,
+            enable_repair=args.enable_repair,
+            enable_fork_search=args.enable_fork_search,
             archive_build_id=args.archive_build_id,
             memory_build_id=args.memory_build_id,
             run_stage=args.run_stage,
@@ -384,9 +457,14 @@ def main() -> None:
             mcmc_steps=args.mcmc_steps
             if args.mcmc_steps is not None
             else MCMC_STEPS,
-            mcmc_block_num=args.mcmc_block_num
-            if args.mcmc_block_num is not None
+            mcmc_block_num=power_block_num
+            if power_block_num is not None
             else MCMC_BLOCK_NUM,
+            power_sampler=args.power_sampler,
+            sps_top_k=args.sps_top_k,
+            sps_candidate_pool_size=args.sps_candidate_pool_size,
+            sps_rollouts_per_candidate=args.sps_rollouts_per_candidate,
+            sps_rollout_horizon=args.sps_rollout_horizon,
             serving_backend_metadata=serving_backend_metadata,
         )
     finally:

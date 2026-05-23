@@ -72,6 +72,38 @@ def test_farmshare_array_script_uses_four_one_gpu_shards():
     assert "python scripts/run_condition.py --track math500" in script
 
 
+def test_farmshare_submit_can_render_one_job_four_l40s_shape(tmp_path, capsys):
+    import scripts.farmshare as farmshare_script
+
+    out = tmp_path / "proicl.sbatch"
+    farmshare_script._cmd_submit(
+        SimpleNamespace(
+            job_name="proicl-rg-signal",
+            remote_root="/scratch/users/$USER/polaris",
+            repo_dir="/scratch/users/$USER/polaris/repo",
+            num_shards=1,
+            array_tasks=1,
+            max_concurrent=1,
+            time_limit="24:00:00",
+            cpus_per_task=32,
+            mem="192G",
+            gres="gpu:4",
+            command="python scripts/run_proicl_signal.py --gpus 0 1 2 3",
+            script_out=out,
+            execute=False,
+            host="farmshare",
+        )
+    )
+
+    script = out.read_text()
+    assert "#SBATCH --array=0-0%1" in script
+    assert "#SBATCH --gres=gpu:4" in script
+    assert "#SBATCH --cpus-per-task=32" in script
+    assert "#SBATCH --mem=192G" in script
+    assert "--gpus 0 1 2 3" in script
+    assert capsys.readouterr().out.startswith("#!/bin/bash")
+
+
 def test_deterministic_shard_assignment():
     assert shard_indices(10, 0, 4) == [0, 4, 8]
     assert shard_indices(10, 3, 4) == [3, 7]
@@ -92,6 +124,7 @@ def test_farmshare_env_installs_accelerate_for_hf_device_map():
     joined = " ".join(commands)
 
     assert "accelerate" in joined
+    assert "reasoning-gym==0.1.25" in joined
     assert "import torch, transformers, accelerate, vllm" in joined
 
 
@@ -122,6 +155,33 @@ def test_farmshare_sync_down_uses_scratch_artifact_root(monkeypatch, tmp_path):
     )
 
     assert "farmshare:/scratch/users/$USER/polaris/runs/prorl_recovery/" in seen["cmd"]
+
+
+def test_farmshare_sync_down_can_target_proicl_signal_artifacts(monkeypatch, tmp_path):
+    import scripts.farmshare as farmshare_script
+
+    seen = {}
+
+    def fake_run(cmd):
+        seen["cmd"] = cmd
+
+    monkeypatch.setattr(farmshare_script, "_run", fake_run)
+    farmshare_script._cmd_sync(
+        SimpleNamespace(
+            direction="down",
+            host="farmshare",
+            remote_root="/scratch/users/$USER/polaris",
+            remote_artifacts="runs/proicl_rg_l40s_signal_20260518",
+            local_artifacts=tmp_path,
+            execute=True,
+        )
+    )
+
+    joined = " ".join(str(part) for part in seen["cmd"])
+    assert (
+        "farmshare:/scratch/users/$USER/polaris/runs/proicl_rg_l40s_signal_20260518/"
+        in joined
+    )
 
 
 def test_farmshare_sync_up_preserves_protocol_progress_file():

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import types
@@ -49,6 +50,7 @@ from polaris.prorl_recovery.orchestration import (
     write_archive,
 )
 from polaris.registry import resolve_model
+from polaris.runners.condition_runner import get_track_config
 
 
 def test_farmshare_slurm_array_renders_deterministic_shards():
@@ -87,6 +89,18 @@ def test_farmshare_probe_includes_gpu_qos_and_nvidia_smi():
     assert "sacctmgr show qos" in joined
     assert "--qos=gpu" in joined
     assert "nvidia-smi -L" in joined
+
+
+def test_reasoning_gym_graph_color_size_track_generates_fixed_vertex_count():
+    pytest.importorskip("reasoning_gym")
+    cfg = get_track_config("reasoning_gym_graph_color_n18")
+
+    problem = cfg.dataset_loader(0, 1)[0]
+    payload = json.loads(problem.answer)
+
+    assert cfg.benchmark == "Reasoning Gym graph_color n=18"
+    assert payload["task"] == "graph_color"
+    assert payload["entry"]["metadata"]["num_vertices"] == 18
 
 
 def test_prorl_model_registry_pins_revisions():
@@ -142,15 +156,15 @@ def test_prorl_recovery_phase_cells_and_commands_are_locked():
         num_shards=4,
         samples_per_problem=16,
     )
-    assert {cell.archive_kind for cell in phase1_rg} == {"reasoning_gym_direct"}
-    assert "reasoning_gym_direct.json" in " ".join(cell_command(phase1_rg[0]))
+    assert {cell.archive_kind for cell in phase1_rg} == {"reasoning_gym_boxnet_direct"}
+    assert "reasoning_gym_boxnet_direct.json" in " ".join(cell_command(phase1_rg[0]))
     assert any(cell.rung == "rung2_bon_t12_k1024" for cell in phase2)
     assert all(f"shard-{cell.shard_id}.sqlite" in cell.cache_path for cell in phase2)
     assert {
         cell.archive_kind
         for cell in phase2
         if cell.rung and cell.rung.startswith(("rung0", "rung1", "rung2", "rung3", "rung4"))
-    } == {"reasoning_gym_direct"}
+    } == {"reasoning_gym_boxnet_direct"}
     assert {
         cell.archive_kind
         for cell in phase2
@@ -369,21 +383,35 @@ def test_write_archive_outputs_direct_and_seed_archive(tmp_path):
     seed = tmp_path / "seed_archive.json"
     rg_direct = tmp_path / "reasoning_gym_direct.json"
     rg_seed = tmp_path / "reasoning_gym_seed_archive.json"
+    rg_family = tmp_path / "reasoning_gym_family_direct.json"
+    rg_graph = tmp_path / "reasoning_gym_graph_direct.json"
+    rg_boxnet = tmp_path / "reasoning_gym_boxnet_direct.json"
 
     write_archive(direct, kind="direct")
     write_archive(seed, kind="seed_archive")
     write_archive(rg_direct, kind="reasoning_gym_direct")
     write_archive(rg_seed, kind="reasoning_gym_seed_archive")
+    write_archive(rg_family, kind="reasoning_gym_family_direct")
+    write_archive(rg_graph, kind="reasoning_gym_graph_color_direct")
+    write_archive(rg_boxnet, kind="reasoning_gym_boxnet_direct")
 
     assert json.loads(direct.read_text())[0]["id"] == "direct"
     assert len(json.loads(seed.read_text())["entries"]) >= 4
     rg_entry = json.loads(rg_direct.read_text())[0]
-    assert "<answer>" in rg_entry["suffix"]
+    assert "<answer>" not in (rg_entry["prefix"] + rg_entry["suffix"])
+    assert "<answer>...</answer>" not in rg_entry["prefix"]
+    assert "<answer>...</answer>" not in rg_entry["suffix"]
+    assert re.search(r"<answer>\s*.*?\s*</answer>", rg_entry["prefix"] + rg_entry["suffix"], re.S) is None
     assert "\\boxed{}" not in rg_entry["suffix"]
     rg_seed_payload = json.loads(rg_seed.read_text())
     assert len(rg_seed_payload["entries"]) >= 4
-    assert all("<answer>" in entry["suffix"] for entry in rg_seed_payload["entries"])
+    assert all("<answer>" not in (entry["prefix"] + entry["suffix"]) for entry in rg_seed_payload["entries"])
+    assert all("<answer>...</answer>" not in entry["prefix"] for entry in rg_seed_payload["entries"])
+    assert all("<answer>...</answer>" not in entry["suffix"] for entry in rg_seed_payload["entries"])
     assert all("\\boxed{}" not in entry["suffix"] for entry in rg_seed_payload["entries"])
+    assert "kinship" in json.loads(rg_family.read_text())[0]["prefix"]
+    assert "JSON object" in json.loads(rg_graph.read_text())[0]["prefix"]
+    assert "JSON list" in json.loads(rg_boxnet.read_text())[0]["prefix"]
 
 
 def test_reasoning_gym_verifier_extracts_answer_tag(monkeypatch):
@@ -414,6 +442,90 @@ def test_reasoning_gym_verifier_extracts_answer_tag(monkeypatch):
     assert seen["answer"] == '{"move": "left"}'
 
 
+def test_reasoning_gym_verifier_uses_last_non_placeholder_answer_tag(monkeypatch):
+    import types
+
+    seen = {}
+
+    class FakeDataset:
+        def score_answer(self, answer, entry):
+            seen["answer"] = answer
+            return 1.0 if answer == "daughter-in-law" else 0.0
+
+    fake_reasoning_gym = types.ModuleType("reasoning_gym")
+    fake_reasoning_gym.create_dataset = lambda task, size, seed: FakeDataset()
+    fake_utils = types.ModuleType("reasoning_gym.utils")
+    fake_utils.extract_answer = lambda completion: "..."
+    monkeypatch.setitem(sys.modules, "reasoning_gym", fake_reasoning_gym)
+    monkeypatch.setitem(sys.modules, "reasoning_gym.utils", fake_utils)
+
+    from polaris.evals.verifiers.reasoning_gym import score_reasoning_gym
+
+    result = score_reasoning_gym(
+        "Prompt says <answer>...</answer>. Model says <answer>daughter-in-law</answer>.",
+        json.dumps({"task": "family_relationships", "entry": {}, "answer": ""}),
+    )
+
+    assert result["passed"] is True
+    assert seen["answer"] == "daughter-in-law"
+
+
+def test_reasoning_gym_verifier_extracts_answer_marker(monkeypatch):
+    import types
+
+    seen = {}
+
+    class FakeDataset:
+        def score_answer(self, answer, entry):
+            seen["answer"] = answer
+            return 1.0 if answer == "grandfather" else 0.0
+
+    fake_reasoning_gym = types.ModuleType("reasoning_gym")
+    fake_reasoning_gym.create_dataset = lambda task, size, seed: FakeDataset()
+    fake_utils = types.ModuleType("reasoning_gym.utils")
+    fake_utils.extract_answer = lambda completion: completion
+    monkeypatch.setitem(sys.modules, "reasoning_gym", fake_reasoning_gym)
+    monkeypatch.setitem(sys.modules, "reasoning_gym.utils", fake_utils)
+
+    from polaris.evals.verifiers.reasoning_gym import score_reasoning_gym
+
+    result = score_reasoning_gym(
+        "Prompt text.\n</think>\n\nAnswer: Grandfather\nextra reasoning ignored",
+        json.dumps({"task": "family_relationships", "entry": {}, "answer": ""}),
+    )
+
+    assert result["passed"] is True
+    assert seen["answer"] == "grandfather"
+
+
+def test_reasoning_gym_verifier_extracts_json_after_answer_marker_prose(monkeypatch):
+    import types
+
+    seen = {}
+
+    class FakeDataset:
+        def score_answer(self, answer, entry):
+            seen["answer"] = answer
+            return 1.0 if answer == '{"0": 1, "1": 2}' else 0.0
+
+    fake_reasoning_gym = types.ModuleType("reasoning_gym")
+    fake_reasoning_gym.create_dataset = lambda task, size, seed: FakeDataset()
+    fake_utils = types.ModuleType("reasoning_gym.utils")
+    fake_utils.extract_answer = lambda completion: completion
+    monkeypatch.setitem(sys.modules, "reasoning_gym", fake_reasoning_gym)
+    monkeypatch.setitem(sys.modules, "reasoning_gym.utils", fake_utils)
+
+    from polaris.evals.verifiers.reasoning_gym import score_reasoning_gym
+
+    result = score_reasoning_gym(
+        'Prompt.\n</think>\n\nAnswer:\nThe required JSON mapping is:\n{"0": 1, "1": 2}\nThis works.',
+        json.dumps({"task": "graph_color", "entry": {}, "answer": ""}),
+    )
+
+    assert result["passed"] is True
+    assert seen["answer"] == '{"0": 1, "1": 2}'
+
+
 def test_reasoning_gym_verifier_fails_closed_on_bad_json_shape(monkeypatch):
     import types
 
@@ -440,6 +552,22 @@ def test_reasoning_gym_verifier_fails_closed_on_bad_json_shape(monkeypatch):
     assert result["scorer_error"].startswith("AttributeError")
 
 
+def test_reasoning_gym_game_of_life_halting_uses_exact_boolean():
+    from polaris.evals.verifiers.reasoning_gym import score_reasoning_gym
+
+    reference = json.dumps(
+        {
+            "task": "game_of_life_halting",
+            "entry": {"answer": "False"},
+            "answer": "False",
+        }
+    )
+
+    assert score_reasoning_gym("answer: False", reference)["passed"] is True
+    assert score_reasoning_gym("answer: True", reference)["passed"] is False
+    assert score_reasoning_gym("answer: deliberately wrong", reference)["passed"] is False
+
+
 def test_hf_generator_passes_revision_to_transformers(monkeypatch):
     seen = {"tokenizer": None, "model": None}
 
@@ -447,13 +575,18 @@ def test_hf_generator_passes_revision_to_transformers(monkeypatch):
         pad_token_id = 0
         eos_token_id = 0
 
+    class FakeModel:
+        def to(self, device):
+            seen["model_to"] = device
+            return self
+
     def fake_tokenizer_from_pretrained(*args, **kwargs):
         seen["tokenizer"] = (args, kwargs)
         return FakeTokenizer()
 
     def fake_model_from_pretrained(*args, **kwargs):
         seen["model"] = (args, kwargs)
-        return SimpleNamespace()
+        return FakeModel()
 
     fake_transformers = types.SimpleNamespace(
         AutoTokenizer=types.SimpleNamespace(from_pretrained=fake_tokenizer_from_pretrained),
@@ -466,11 +599,24 @@ def test_hf_generator_passes_revision_to_transformers(monkeypatch):
 
     from polaris.infra.serving.hf import RWSGenerator
 
-    gen = RWSGenerator(model_id="fake-model", revision="v2", seed=1)
+    gen = RWSGenerator(
+        model_id="fake-model",
+        revision="v2",
+        seed=1,
+        torch_dtype="float32",
+        score_segments_mode="cached_decode",
+        device_map_auto=False,
+    )
 
     assert gen.revision == "v2"
     assert seen["tokenizer"][1]["revision"] == "v2"
     assert seen["model"][1]["revision"] == "v2"
+    assert str(seen["model"][1]["torch_dtype"]) == "torch.float32"
+    assert seen["model"][1]["device_map"] is None
+    assert seen["model_to"] == "cuda"
+    assert gen.runtime_metadata()["torch_dtype"] == "float32"
+    assert gen.runtime_metadata()["score_segments_mode"] == "cached_decode"
+    assert gen.runtime_metadata()["device_map_auto"] is False
 
 
 def test_vllm_generator_passes_revision_to_loader(monkeypatch):
