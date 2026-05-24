@@ -7,6 +7,9 @@ Run the ProICL held-out experiment.
 
 Default run:
   bash scripts/run_experiment.sh
+  bash scripts/run_experiment_l40.sh
+  bash scripts/run_experiment_a100.sh
+  bash scripts/run_experiment_h100.sh
 
 Useful overrides:
   EVAL_END=30 ROLLOUT_BUDGET=2 bash scripts/run_experiment.sh
@@ -23,8 +26,12 @@ Environment knobs:
   GEPA_DEV_START/END       GEPA dev slice. Default: 0/50
   ROLLOUT_BUDGET           Samples per non-greedy condition. Default: 8
   NUM_SHARDS               Per-condition shards. Default: detected GPU count, at least 1
-  GPUS                     Optional comma-separated GPU ids; sets CUDA_VISIBLE_DEVICES.
+  MAX_PARALLEL_CELLS       Concurrent vLLM cell workers. Default: host-memory-aware.
+  SMOKE_MAX_PARALLEL_CELLS Concurrent smoke workers. Default: 1.
+  OVERLAP_GEPA_AND_CELLS=1 Overlap GEPA archive build with direct eval cells. Default: off.
+  GPUS                     Optional comma-separated GPU ids; overrides auto-detection.
   GPU_MEMORY_MIB           Optional comma-separated GPU memory override for dry runs/tests.
+  HOST_MEMORY_MIB          Optional host memory override for dry runs/tests.
   MAX_NEW_TOKENS           Generation cap. Default: 1024
   SPS_BLOCK_SIZE           Target SPS block size. Default: 192
   SPS_BLOCK_NUM            Override computed SPS block count.
@@ -33,10 +40,15 @@ Environment knobs:
   SPS_ROLLOUTS_PER_CANDIDATE Lookahead rollouts per candidate. Default: 8
   SPS_ROLLOUT_HORIZON      Lookahead horizon tokens. Default: 128
   SPS_CHAIN_BATCH_SIZE     Archive-prompt SPS chains per vLLM batch. Default: GPU-aware.
-  GPU_PROFILE              auto, a100, h100, or generic. Default: auto
+  GPU_PROFILE              auto, l40, a100, h100, or generic. Default: auto
+  PROFILE_MAX_PARALLEL_CELLS Profile-level cap for concurrent cell workers.
+  HOST_MEMORY_PER_CELL_MIB Host RAM budget per concurrent vLLM cell worker.
+  HOST_MEMORY_RESERVE_MIB  Host RAM reserve before assigning cell workers.
   VLLM_PARITY_ARTIFACT     Existing calibration_summary.json. If unset, calibration is run.
   SKIP_INSTALL=1           Reuse the current environment.
   INSTALL_PROFILE          standard or full. Default: standard.
+  REFLECTION_PROVIDER      xai or local-hf. Default: local-hf.
+  WANDB_PROJECT            W&B project when WANDB_API_KEY is set. Default: proicl.
   SKIP_CALIBRATION=1       Require VLLM_PARITY_ARTIFACT instead of running calibration.
   SKIP_SPS_MATH500_CALIBRATION=0 Run the slow SPS-vs-MCMC MATH500 gate. Default: skipped.
   SMOKE_ONLY=1             Run only the harness smoke.
@@ -60,10 +72,6 @@ SKIP_CALIBRATION="${SKIP_CALIBRATION:-0}"
 SKIP_SPS_MATH500_CALIBRATION="${SKIP_SPS_MATH500_CALIBRATION:-1}"
 SMOKE_ONLY="${SMOKE_ONLY:-0}"
 INCLUDE_CANDIDATES="${INCLUDE_CANDIDATES:-0}"
-
-if [[ -n "${GPUS:-}" ]]; then
-  export CUDA_VISIBLE_DEVICES="$GPUS"
-fi
 
 RUN_ROOT="${RUN_ROOT:-runs/experiment}"
 RUN_TAG="${RUN_TAG:-heldout}"
@@ -104,9 +112,96 @@ if [[ ! -x "$PY" ]]; then
   PY="python"
 fi
 
+normalize_gpu_csv() {
+  local raw="$1"
+  raw="$(printf '%s' "$raw" | tr ' \t\n;' ',')"
+  raw="$(printf '%s' "$raw" | sed -E 's/(^|,)gpu:/\1/g; s/,+/,/g; s/^,//; s/,$//')"
+  if [[ "$raw" == "NoDevFiles" || "$raw" == "none" || "$raw" == "N/A" ]]; then
+    raw=""
+  fi
+  printf '%s\n' "$raw"
+}
+
+gpu_count_to_csv() {
+  local count="$1"
+  if [[ "$count" =~ ^[0-9]+$ && "$count" -gt 0 ]]; then
+    seq 0 $((count - 1)) | paste -sd ',' -
+  fi
+}
+
+slurm_gpu_list_to_csv() {
+  local raw="$1"
+  raw="$(normalize_gpu_csv "$raw")"
+  echo "$raw"
+}
+
+slurm_gpu_count_to_csv() {
+  local raw="$1"
+  raw="$(normalize_gpu_csv "$raw")"
+  if [[ "$raw" =~ ^[0-9]+$ ]]; then
+    gpu_count_to_csv "$raw"
+    return
+  fi
+  echo "$raw"
+}
+
+detect_nvidia_smi_gpus() {
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=index --format=csv,noheader,nounits 2>/dev/null \
+      | paste -sd ',' - || true
+    return
+  fi
+  echo ""
+}
+
+detect_assigned_gpus() {
+  local source="default"
+  local raw=""
+  if [[ -n "${GPUS:-}" ]]; then
+    source="GPUS"
+    raw="$GPUS"
+  elif [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+    source="CUDA_VISIBLE_DEVICES"
+    raw="$CUDA_VISIBLE_DEVICES"
+  elif [[ -n "${SLURM_STEP_GPUS:-}" ]]; then
+    source="SLURM_STEP_GPUS"
+    raw="$(slurm_gpu_list_to_csv "$SLURM_STEP_GPUS")"
+  elif [[ -n "${SLURM_JOB_GPUS:-}" ]]; then
+    source="SLURM_JOB_GPUS"
+    raw="$(slurm_gpu_list_to_csv "$SLURM_JOB_GPUS")"
+  elif [[ -n "${SLURM_GPUS_ON_NODE:-}" ]]; then
+    source="SLURM_GPUS_ON_NODE"
+    raw="$(slurm_gpu_count_to_csv "$SLURM_GPUS_ON_NODE")"
+  elif [[ -n "${SLURM_GPUS:-}" ]]; then
+    source="SLURM_GPUS"
+    raw="$(slurm_gpu_count_to_csv "$SLURM_GPUS")"
+  elif [[ -n "${NVIDIA_VISIBLE_DEVICES:-}" && "${NVIDIA_VISIBLE_DEVICES:-}" != "all" ]]; then
+    source="NVIDIA_VISIBLE_DEVICES"
+    raw="$NVIDIA_VISIBLE_DEVICES"
+  else
+    source="nvidia-smi"
+    raw="$(detect_nvidia_smi_gpus)"
+  fi
+  raw="$(normalize_gpu_csv "$raw")"
+  if [[ -z "$raw" ]]; then
+    source="fallback"
+    raw="0"
+  fi
+  printf '%s\t%s\n' "$source" "$raw"
+}
+
+count_gpu_csv() {
+  awk -F',' '
+    { n = 0; for (i = 1; i <= NF; i++) { if ($i != "") n++ } print n }
+  ' <<<"$1"
+}
+
+read -r GPU_DETECTION_SOURCE ASSIGNED_GPUS < <(detect_assigned_gpus)
+export CUDA_VISIBLE_DEVICES="$ASSIGNED_GPUS"
+
 detect_gpu_count() {
   if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
-    awk -F',' '{print NF}' <<<"$CUDA_VISIBLE_DEVICES"
+    count_gpu_csv "$CUDA_VISIBLE_DEVICES"
     return
   fi
   if command -v nvidia-smi >/dev/null 2>&1; then
@@ -125,6 +220,7 @@ detect_gpu_profile() {
   case "$(tr '[:upper:]' '[:lower:]' <<<"$raw_names")" in
     *h100*) echo "h100" ;;
     *a100*) echo "a100" ;;
+    *l40*) echo "l40" ;;
     *) echo "generic" ;;
   esac
 }
@@ -179,38 +275,131 @@ detect_min_gpu_memory_mib() {
   echo 0
 }
 
+_mib_from_bytes() {
+  awk '{ printf "%d\n", $1 / 1024 / 1024 }'
+}
+
+detect_host_memory_mib() {
+  if [[ -n "${HOST_MEMORY_MIB:-}" ]]; then
+    awk '{ gsub(/[^0-9]/, "", $0); print $0 + 0 }' <<<"$HOST_MEMORY_MIB"
+    return
+  fi
+  if [[ -n "${SLURM_MEM_PER_NODE:-}" && "${SLURM_MEM_PER_NODE:-0}" != "0" ]]; then
+    awk '{ gsub(/[^0-9]/, "", $0); print $0 + 0 }' <<<"$SLURM_MEM_PER_NODE"
+    return
+  fi
+  if [[ -n "${SLURM_MEM_PER_GPU:-}" && "${SLURM_MEM_PER_GPU:-0}" != "0" ]]; then
+    awk -v g="$GPU_COUNT" '{ gsub(/[^0-9]/, "", $0); print ($0 + 0) * g }' <<<"$SLURM_MEM_PER_GPU"
+    return
+  fi
+  if [[ -n "${SLURM_MEM_PER_CPU:-}" && "${SLURM_MEM_PER_CPU:-0}" != "0" ]]; then
+    local cpus
+    cpus="${SLURM_CPUS_PER_TASK:-${SLURM_CPUS_ON_NODE:-1}}"
+    awk -v c="$cpus" '{ gsub(/[^0-9]/, "", $0); print ($0 + 0) * c }' <<<"$SLURM_MEM_PER_CPU"
+    return
+  fi
+  if [[ -f /sys/fs/cgroup/memory.max ]]; then
+    local raw
+    raw="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || true)"
+    if [[ "$raw" =~ ^[0-9]+$ && "$raw" -gt 0 && "$raw" -lt 9000000000000000000 ]]; then
+      _mib_from_bytes <<<"$raw"
+      return
+    fi
+  fi
+  if [[ -f /sys/fs/cgroup/memory/memory.limit_in_bytes ]]; then
+    local raw
+    raw="$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || true)"
+    if [[ "$raw" =~ ^[0-9]+$ && "$raw" -gt 0 && "$raw" -lt 9000000000000000000 ]]; then
+      _mib_from_bytes <<<"$raw"
+      return
+    fi
+  fi
+  if [[ -f /proc/meminfo ]]; then
+    awk '/MemTotal:/ { printf "%d\n", $2 / 1024 }' /proc/meminfo
+    return
+  fi
+  echo 0
+}
+
+default_parallel_cells() {
+  local default="$GPU_COUNT"
+  local reserve="${HOST_MEMORY_RESERVE_MIB:-16384}"
+  local per_cell="${HOST_MEMORY_PER_CELL_MIB:-32768}"
+  local profile_cap="${PROFILE_MAX_PARALLEL_CELLS:-0}"
+  if [[ "$HOST_MEMORY_MIB_DETECTED" -gt "$reserve" ]]; then
+    local by_host=$(( (HOST_MEMORY_MIB_DETECTED - reserve) / per_cell ))
+    if [[ "$by_host" -lt 1 ]]; then
+      by_host=1
+    fi
+    if [[ "$by_host" -lt "$default" ]]; then
+      default="$by_host"
+    fi
+  elif [[ "$GPU_MIN_MEMORY_MIB" -gt 0 && "$GPU_MIN_MEMORY_MIB" -lt 60000 ]]; then
+    default=1
+  fi
+  if [[ "$default" -lt 1 ]]; then
+    default=1
+  fi
+  if [[ "$default" -gt "$GPU_COUNT" ]]; then
+    default="$GPU_COUNT"
+  fi
+  if [[ "$profile_cap" -gt 0 && "$default" -gt "$profile_cap" ]]; then
+    default="$profile_cap"
+  fi
+  echo "$default"
+}
+
 GPU_COUNT="$(detect_gpu_count)"
 if [[ "$GPU_COUNT" -lt 1 ]]; then
   GPU_COUNT=1
 fi
 GPU_NAMES_DETECTED="$(detect_gpu_names)"
 GPU_MIN_MEMORY_MIB="$(detect_min_gpu_memory_mib)"
+HOST_MEMORY_MIB_DETECTED="$(detect_host_memory_mib)"
 NUM_SHARDS="${NUM_SHARDS:-$GPU_COUNT}"
 GPU_PROFILE="${GPU_PROFILE:-auto}"
 if [[ "$GPU_PROFILE" == "auto" ]]; then
   GPU_PROFILE="$(detect_gpu_profile)"
 fi
 case "$GPU_PROFILE" in
+  l40)
+    DEFAULT_VLLM_GPU_MEMORY_UTILIZATION="0.78"
+    DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.45"
+    DEFAULT_WALL_CLOCK_SECONDS_PER_CELL="10800"
+    DEFAULT_SPS_CHAIN_BATCH_SIZE="1"
+    DEFAULT_PROFILE_MAX_PARALLEL_CELLS="2"
+    DEFAULT_HOST_MEMORY_RESERVE_MIB="32768"
+    DEFAULT_HOST_MEMORY_PER_CELL_MIB="49152"
+    ;;
   h100)
     DEFAULT_VLLM_GPU_MEMORY_UTILIZATION="0.88"
     DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.60"
     DEFAULT_WALL_CLOCK_SECONDS_PER_CELL="3600"
     DEFAULT_SPS_CHAIN_BATCH_SIZE="2"
+    DEFAULT_PROFILE_MAX_PARALLEL_CELLS="6"
+    DEFAULT_HOST_MEMORY_RESERVE_MIB="32768"
+    DEFAULT_HOST_MEMORY_PER_CELL_MIB="40960"
     ;;
   a100)
     DEFAULT_VLLM_GPU_MEMORY_UTILIZATION="0.85"
     DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.55"
     DEFAULT_WALL_CLOCK_SECONDS_PER_CELL="7200"
     DEFAULT_SPS_CHAIN_BATCH_SIZE="2"
+    DEFAULT_PROFILE_MAX_PARALLEL_CELLS="4"
+    DEFAULT_HOST_MEMORY_RESERVE_MIB="32768"
+    DEFAULT_HOST_MEMORY_PER_CELL_MIB="40960"
     ;;
   generic)
     DEFAULT_VLLM_GPU_MEMORY_UTILIZATION="0.80"
     DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.50"
     DEFAULT_WALL_CLOCK_SECONDS_PER_CELL="7200"
     DEFAULT_SPS_CHAIN_BATCH_SIZE="1"
+    DEFAULT_PROFILE_MAX_PARALLEL_CELLS="1"
+    DEFAULT_HOST_MEMORY_RESERVE_MIB="32768"
+    DEFAULT_HOST_MEMORY_PER_CELL_MIB="49152"
     ;;
   *)
-    echo "GPU_PROFILE must be one of auto, a100, h100, generic; got $GPU_PROFILE" >&2
+    echo "GPU_PROFILE must be one of auto, l40, a100, h100, generic; got $GPU_PROFILE" >&2
     exit 1
     ;;
 esac
@@ -225,7 +414,36 @@ ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL="${ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL:-
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-$DEFAULT_VLLM_GPU_MEMORY_UTILIZATION}"
 CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="${CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION:-$DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION}"
 SPS_CHAIN_BATCH_SIZE="${SPS_CHAIN_BATCH_SIZE:-$DEFAULT_SPS_CHAIN_BATCH_SIZE}"
-PARALLELISM_STRATEGY="one cell worker per visible GPU; GEPA/archive build reserves GPU 0 while direct baseline cells overlap on remaining GPUs"
+if [[ "$GPU_MIN_MEMORY_MIB" -gt 0 && "$GPU_MIN_MEMORY_MIB" -lt 60000 && "${ALLOW_LOW_VRAM_HIGH_UTIL:-0}" != "1" ]]; then
+  VLLM_GPU_MEMORY_UTILIZATION="0.80"
+  CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.50"
+  SPS_CHAIN_BATCH_SIZE="1"
+fi
+PROFILE_MAX_PARALLEL_CELLS="${PROFILE_MAX_PARALLEL_CELLS:-$DEFAULT_PROFILE_MAX_PARALLEL_CELLS}"
+HOST_MEMORY_RESERVE_MIB="${HOST_MEMORY_RESERVE_MIB:-$DEFAULT_HOST_MEMORY_RESERVE_MIB}"
+HOST_MEMORY_PER_CELL_MIB="${HOST_MEMORY_PER_CELL_MIB:-$DEFAULT_HOST_MEMORY_PER_CELL_MIB}"
+MAX_PARALLEL_CELLS="${MAX_PARALLEL_CELLS:-$(default_parallel_cells)}"
+if [[ "$MAX_PARALLEL_CELLS" -lt 1 ]]; then
+  MAX_PARALLEL_CELLS=1
+fi
+if [[ "$MAX_PARALLEL_CELLS" -gt "$GPU_COUNT" ]]; then
+  MAX_PARALLEL_CELLS="$GPU_COUNT"
+fi
+SMOKE_MAX_PARALLEL_CELLS="${SMOKE_MAX_PARALLEL_CELLS:-1}"
+if [[ "$SMOKE_MAX_PARALLEL_CELLS" -lt 1 ]]; then
+  SMOKE_MAX_PARALLEL_CELLS=1
+fi
+if [[ "$SMOKE_MAX_PARALLEL_CELLS" -gt "$MAX_PARALLEL_CELLS" ]]; then
+  SMOKE_MAX_PARALLEL_CELLS="$MAX_PARALLEL_CELLS"
+fi
+OVERLAP_GEPA_AND_CELLS="${OVERLAP_GEPA_AND_CELLS:-0}"
+PARALLELISM_STRATEGY="host-memory-aware cell workers; smoke is sequential by default; GEPA/direct-cell overlap is opt-in"
+MIN_GPU_MEMORY_MIB="${MIN_GPU_MEMORY_MIB:-24000}"
+if [[ "$GPU_MIN_MEMORY_MIB" -gt 0 && "$GPU_MIN_MEMORY_MIB" -lt "$MIN_GPU_MEMORY_MIB" ]]; then
+  echo "Detected minimum GPU memory ${GPU_MIN_MEMORY_MIB}MiB, below required ${MIN_GPU_MEMORY_MIB}MiB." >&2
+  echo "Use a larger GPU profile or lower the experiment settings before launching." >&2
+  exit 1
+fi
 
 CACHE_ROOT="${PROICL_CACHE_ROOT:-$REPO_ROOT/.cache/proicl}"
 export HF_HOME="${HF_HOME:-$CACHE_ROOT/huggingface}"
@@ -256,11 +474,19 @@ out = sys.argv[1]
 payload = {
     "schema": "proicl_launch_config.v1",
     "gpu_profile": os.environ["PROICL_GPU_PROFILE"],
+    "gpu_detection_source": os.environ["PROICL_GPU_DETECTION_SOURCE"],
     "gpu_names": os.environ.get("PROICL_GPU_NAMES", "unknown"),
     "gpu_min_memory_mib": int(os.environ.get("PROICL_GPU_MIN_MEMORY_MIB", "0")),
+    "host_memory_mib": int(os.environ.get("PROICL_HOST_MEMORY_MIB", "0")),
     "gpu_count": int(os.environ["PROICL_GPU_COUNT"]),
     "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
     "num_shards": int(os.environ["PROICL_NUM_SHARDS"]),
+    "max_parallel_cells": int(os.environ["PROICL_MAX_PARALLEL_CELLS"]),
+    "smoke_max_parallel_cells": int(os.environ["PROICL_SMOKE_MAX_PARALLEL_CELLS"]),
+    "overlap_gepa_and_cells": os.environ["PROICL_OVERLAP_GEPA_AND_CELLS"] == "1",
+    "profile_max_parallel_cells": int(os.environ["PROICL_PROFILE_MAX_PARALLEL_CELLS"]),
+    "host_memory_reserve_mib": int(os.environ["PROICL_HOST_MEMORY_RESERVE_MIB"]),
+    "host_memory_per_cell_mib": int(os.environ["PROICL_HOST_MEMORY_PER_CELL_MIB"]),
     "parallelism_strategy": os.environ["PROICL_PARALLELISM_STRATEGY"],
     "vllm_gpu_memory_utilization": float(os.environ["PROICL_VLLM_GPU_MEMORY_UTILIZATION"]),
     "calibration_vllm_gpu_memory_utilization": float(
@@ -271,6 +497,7 @@ payload = {
     ),
     "run_root": os.environ["PROICL_RUN_ROOT"],
     "run_tag": os.environ["PROICL_RUN_TAG"],
+    "reflection_provider": os.environ["PROICL_REFLECTION_PROVIDER"],
     "tracks": os.environ["PROICL_TRACKS"].split(),
     "conditions": os.environ["PROICL_CONDITIONS"].split(),
     "eval_split": [
@@ -298,28 +525,86 @@ with open(out, "w", encoding="utf-8") as f:
 PY
 }
 
+write_resource_probe() {
+  local out="$1"
+  "$PY" - "$out" <<'PY'
+import json
+import os
+import sys
+
+out = sys.argv[1]
+slurm_keys = [
+    "SLURM_JOB_ID",
+    "SLURM_JOB_NAME",
+    "SLURM_STEP_ID",
+    "SLURM_STEP_GPUS",
+    "SLURM_JOB_GPUS",
+    "SLURM_GPUS",
+    "SLURM_GPUS_ON_NODE",
+    "SLURM_MEM_PER_NODE",
+    "SLURM_MEM_PER_GPU",
+    "SLURM_MEM_PER_CPU",
+    "SLURM_CPUS_PER_TASK",
+    "SLURM_CPUS_ON_NODE",
+    "SLURM_JOB_NODELIST",
+]
+payload = {
+    "schema": "proicl_resource_probe.v1",
+    "gpu_detection_source": os.environ.get("PROICL_GPU_DETECTION_SOURCE"),
+    "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+    "gpu_count": int(os.environ.get("PROICL_GPU_COUNT", "0")),
+    "gpu_names": os.environ.get("PROICL_GPU_NAMES", "unknown"),
+    "gpu_min_memory_mib": int(os.environ.get("PROICL_GPU_MIN_MEMORY_MIB", "0")),
+    "host_memory_mib": int(os.environ.get("PROICL_HOST_MEMORY_MIB", "0")),
+    "max_parallel_cells": int(os.environ.get("PROICL_MAX_PARALLEL_CELLS", "0")),
+    "smoke_max_parallel_cells": int(os.environ.get("PROICL_SMOKE_MAX_PARALLEL_CELLS", "0")),
+    "profile_max_parallel_cells": int(os.environ.get("PROICL_PROFILE_MAX_PARALLEL_CELLS", "0")),
+    "host_memory_reserve_mib": int(os.environ.get("PROICL_HOST_MEMORY_RESERVE_MIB", "0")),
+    "host_memory_per_cell_mib": int(os.environ.get("PROICL_HOST_MEMORY_PER_CELL_MIB", "0")),
+    "slurm": {key: os.environ.get(key) for key in slurm_keys if os.environ.get(key) is not None},
+}
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(payload, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
+}
+
 print_launch_summary() {
   echo "ProICL launch profile:"
   echo "  gpu_profile=$GPU_PROFILE gpu_count=$GPU_COUNT cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-all}"
+  echo "  gpu_detection_source=$GPU_DETECTION_SOURCE"
   echo "  gpu_names=$GPU_NAMES_DETECTED"
   echo "  gpu_min_memory_mib=$GPU_MIN_MEMORY_MIB"
+  echo "  host_memory_mib=$HOST_MEMORY_MIB_DETECTED"
   echo "  num_shards=$NUM_SHARDS strategy=$PARALLELISM_STRATEGY"
+  echo "  max_parallel_cells=$MAX_PARALLEL_CELLS smoke_max_parallel_cells=$SMOKE_MAX_PARALLEL_CELLS overlap_gepa_and_cells=$OVERLAP_GEPA_AND_CELLS"
+  echo "  profile_max_parallel_cells=$PROFILE_MAX_PARALLEL_CELLS host_memory_reserve_mib=$HOST_MEMORY_RESERVE_MIB host_memory_per_cell_mib=$HOST_MEMORY_PER_CELL_MIB"
   echo "  vllm_gpu_memory_utilization=$VLLM_GPU_MEMORY_UTILIZATION calibration=$CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION"
   echo "  sps_chain_batch_size=$SPS_CHAIN_BATCH_SIZE"
+  echo "  reflection_provider=$REFLECTION_PROVIDER"
   echo "  estimated_wall_clock_seconds_per_cell=$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
 }
 
 export PROICL_GPU_PROFILE="$GPU_PROFILE"
+export PROICL_GPU_DETECTION_SOURCE="$GPU_DETECTION_SOURCE"
 export PROICL_GPU_NAMES="$GPU_NAMES_DETECTED"
 export PROICL_GPU_MIN_MEMORY_MIB="$GPU_MIN_MEMORY_MIB"
+export PROICL_HOST_MEMORY_MIB="$HOST_MEMORY_MIB_DETECTED"
 export PROICL_GPU_COUNT="$GPU_COUNT"
 export PROICL_NUM_SHARDS="$NUM_SHARDS"
+export PROICL_MAX_PARALLEL_CELLS="$MAX_PARALLEL_CELLS"
+export PROICL_SMOKE_MAX_PARALLEL_CELLS="$SMOKE_MAX_PARALLEL_CELLS"
+export PROICL_OVERLAP_GEPA_AND_CELLS="$OVERLAP_GEPA_AND_CELLS"
+export PROICL_PROFILE_MAX_PARALLEL_CELLS="$PROFILE_MAX_PARALLEL_CELLS"
+export PROICL_HOST_MEMORY_RESERVE_MIB="$HOST_MEMORY_RESERVE_MIB"
+export PROICL_HOST_MEMORY_PER_CELL_MIB="$HOST_MEMORY_PER_CELL_MIB"
 export PROICL_PARALLELISM_STRATEGY="$PARALLELISM_STRATEGY"
 export PROICL_VLLM_GPU_MEMORY_UTILIZATION="$VLLM_GPU_MEMORY_UTILIZATION"
 export PROICL_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="$CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION"
 export PROICL_ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL="$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
 export PROICL_RUN_ROOT="$RUN_ROOT"
 export PROICL_RUN_TAG="$RUN_TAG"
+export PROICL_REFLECTION_PROVIDER="$REFLECTION_PROVIDER"
 export PROICL_TRACKS="$TRACKS"
 export PROICL_CONDITIONS="$CONDITIONS"
 export PROICL_EVAL_START="$EVAL_START"
@@ -338,6 +623,7 @@ export PROICL_SPS_CHAIN_BATCH_SIZE="$SPS_CHAIN_BATCH_SIZE"
 print_launch_summary
 if [[ "$DRY_RUN" != "1" ]]; then
   write_launch_config "$RUN_ROOT/launch_config.json"
+  write_resource_probe "$RUN_ROOT/resource_probe.json"
 fi
 
 run_cmd() {
@@ -369,6 +655,9 @@ if [[ "$DRY_RUN" != "1" && "$SKIP_INSTALL" != "1" ]]; then
   case "$INSTALL_PROFILE" in
     standard|light)
       run_cmd "$PY" -m pip install -r requirements.txt
+      if [[ "$REFLECTION_PROVIDER" == "xai" ]]; then
+        run_cmd "$PY" -m pip install -e ".[gepa_reflection]"
+      fi
       ;;
     full)
       run_cmd "$PY" -m pip install -e ".[code,dc,gepa_reflection]"
@@ -379,6 +668,22 @@ if [[ "$DRY_RUN" != "1" && "$SKIP_INSTALL" != "1" ]]; then
       exit 1
       ;;
   esac
+fi
+
+if [[ "$DRY_RUN" != "1" && "$REFLECTION_PROVIDER" == "xai" ]]; then
+  if ! "$PY" -c "import litellm" >/dev/null 2>&1; then
+    echo "REFLECTION_PROVIDER=xai requires litellm. Run: $PY -m pip install -e '.[gepa_reflection]'" >&2
+    exit 1
+  fi
+fi
+
+if [[ "$DRY_RUN" != "1" ]]; then
+  section "Initializing optional W&B tracking"
+  run_cmd "$PY" scripts/wandb_run.py start \
+    --run-root "$RUN_ROOT" \
+    --config "$RUN_ROOT/launch_config.json" \
+    --resource-probe "$RUN_ROOT/resource_probe.json" \
+    --env-file "$REPO_ROOT/.env"
 fi
 
 if [[ "$DRY_RUN" != "1" ]]; then
@@ -462,6 +767,8 @@ MAIN_CMD=(
   --sps-rollouts-per-candidate "$SPS_ROLLOUTS_PER_CANDIDATE"
   --sps-rollout-horizon "$SPS_ROLLOUT_HORIZON"
   --num-shards "$NUM_SHARDS"
+  --max-parallel-cells "$MAX_PARALLEL_CELLS"
+  --smoke-max-parallel-cells "$SMOKE_MAX_PARALLEL_CELLS"
   --memory-num-shards 1
   --estimated-wall-clock-seconds-per-cell "$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
   --reflection-provider "$REFLECTION_PROVIDER"
@@ -476,6 +783,9 @@ if [[ "${SKIP_PREFETCH:-0}" == "1" ]]; then
 fi
 if [[ "${LOCAL_FILES_ONLY:-0}" == "1" ]]; then
   MAIN_CMD+=(--local-files-only)
+fi
+if [[ "$OVERLAP_GEPA_AND_CELLS" == "1" ]]; then
+  MAIN_CMD+=(--overlap-gepa-and-cells)
 fi
 if [[ -n "${VLLM_GPU_MEMORY_UTILIZATION:-}" ]]; then
   MAIN_CMD+=(--vllm-gpu-memory-utilization "$VLLM_GPU_MEMORY_UTILIZATION")
@@ -505,6 +815,10 @@ if [[ -z "$RUN_DIR" ]]; then
   exit 1
 fi
 cp "$RUN_ROOT/launch_config.json" "$RUN_DIR/launch_config.json"
+cp "$RUN_ROOT/resource_probe.json" "$RUN_DIR/resource_probe.json"
+if [[ -f "$RUN_ROOT/wandb.json" ]]; then
+  cp "$RUN_ROOT/wandb.json" "$RUN_DIR/wandb.json"
+fi
 
 PACKAGE_ROOT="$RUN_DIR"
 if [[ "$SMOKE_ONLY" == "1" ]]; then
@@ -526,4 +840,12 @@ echo
 echo "Run directory: $RUN_DIR"
 BUNDLE_PATH="$PACKAGE_ROOT/results_bundle.tar.gz"
 BUNDLE_ABS="$(cd "$(dirname "$BUNDLE_PATH")" && pwd)/$(basename "$BUNDLE_PATH")"
+if [[ -f "$RUN_DIR/wandb.json" ]]; then
+  run_cmd "$PY" scripts/wandb_run.py finish \
+    --run-root "$RUN_DIR" \
+    --bundle "$BUNDLE_ABS" \
+    --summary "$RUN_DIR/full/analysis/aggregate_stdout.json" \
+    --events "$RUN_DIR/full/events.jsonl" \
+    --env-file "$REPO_ROOT/.env"
+fi
 echo "Result bundle: $BUNDLE_ABS"

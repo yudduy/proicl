@@ -1425,19 +1425,15 @@ def smoke_archive_sps_one_problem_a100_40gb(
     )
 
 
-@app.function(
-    gpu="A100-40GB",
-    timeout=3600,
-    volumes={"/cache/huggingface": hf_cache},
-)
-def smoke_run_experiment_script_a100_40gb(
+def _smoke_run_experiment_script_impl(
+    *,
+    profile_script: str,
     max_new_tokens: int = 64,
     vllm_max_model_len: int = 2048,
     estimated_dollar_cost: float | None = None,
     cost_cap_dollars: float | None = None,
     user_authorized_paid_run: bool = False,
 ) -> dict:
-    """Run scripts/run_experiment.sh in SMOKE_ONLY mode on one constrained GPU."""
     _setup_paths()
     from polaris.registry import resolve_model
 
@@ -1464,15 +1460,12 @@ env.update({{
     "SMOKE_ONLY": "1",
     "SKIP_INSTALL": "1",
     "SKIP_SPS_MATH500_CALIBRATION": "1",
-    "GPUS": "0",
-    "GPU_PROFILE": "generic",
-    "SPS_CHAIN_BATCH_SIZE": "1",
     "MAX_NEW_TOKENS": str({int(max_new_tokens)}),
     "VLLM_MAX_MODEL_LEN": str({int(vllm_max_model_len)}),
     "REFLECTION_PROVIDER": "local-hf",
 }})
 proc = subprocess.run(
-    ["bash", "/proicl/scripts/run_experiment.sh"],
+    ["bash", "/proicl/scripts/{profile_script}"],
     cwd="/proicl",
     env=env,
     text=True,
@@ -1481,12 +1474,14 @@ proc = subprocess.run(
 )
 run_root = Path("/tmp/proicl-run-experiment-smoke")
 launch_config = run_root / "launch_config.json"
+resource_probe = run_root / "resource_probe.json"
 payload = {{
     "passed": proc.returncode == 0,
     "returncode": proc.returncode,
     "stdout_tail": proc.stdout[-4000:],
     "stderr_tail": proc.stderr[-4000:],
     "launch_config": json.loads(launch_config.read_text()) if launch_config.exists() else None,
+    "resource_probe": json.loads(resource_probe.read_text()) if resource_probe.exists() else None,
 }}
 if proc.returncode == 0:
     bundles = sorted(run_root.rglob("results_bundle.tar.gz"))
@@ -1499,3 +1494,72 @@ if proc.returncode != 0:
     )
     print(f"smoke_run_experiment_script: {summary}")
     return summary
+
+
+@app.function(
+    gpu="L40S",
+    timeout=3600,
+    volumes={"/cache/huggingface": hf_cache},
+)
+def smoke_run_experiment_script_l40(
+    max_new_tokens: int = 64,
+    vllm_max_model_len: int = 2048,
+    estimated_dollar_cost: float | None = None,
+    cost_cap_dollars: float | None = None,
+    user_authorized_paid_run: bool = False,
+) -> dict:
+    """Run scripts/run_experiment_l40.sh in SMOKE_ONLY mode on one Modal L40S."""
+    return _smoke_run_experiment_script_impl(
+        profile_script="run_experiment_l40.sh",
+        max_new_tokens=max_new_tokens,
+        vllm_max_model_len=vllm_max_model_len,
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+    )
+
+
+@app.function(
+    gpu="A100-40GB",
+    timeout=3600,
+    volumes={"/cache/huggingface": hf_cache},
+)
+def smoke_run_experiment_script_a100_40gb(
+    max_new_tokens: int = 64,
+    vllm_max_model_len: int = 2048,
+    estimated_dollar_cost: float | None = None,
+    cost_cap_dollars: float | None = None,
+    user_authorized_paid_run: bool = False,
+) -> dict:
+    """Run scripts/run_experiment_a100.sh in SMOKE_ONLY mode on one A100-40GB."""
+    return _smoke_run_experiment_script_impl(
+        profile_script="run_experiment_a100.sh",
+        max_new_tokens=max_new_tokens,
+        vllm_max_model_len=vllm_max_model_len,
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+    )
+
+
+@app.function(
+    gpu="H100",
+    timeout=3600,
+    volumes={"/cache/huggingface": hf_cache},
+)
+def smoke_run_experiment_script_h100(
+    max_new_tokens: int = 64,
+    vllm_max_model_len: int = 2048,
+    estimated_dollar_cost: float | None = None,
+    cost_cap_dollars: float | None = None,
+    user_authorized_paid_run: bool = False,
+) -> dict:
+    """Run scripts/run_experiment_h100.sh in SMOKE_ONLY mode on one H100."""
+    return _smoke_run_experiment_script_impl(
+        profile_script="run_experiment_h100.sh",
+        max_new_tokens=max_new_tokens,
+        vllm_max_model_len=vllm_max_model_len,
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+    )

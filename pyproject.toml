@@ -17,6 +17,7 @@ dependencies = [
   "torch",
   "tqdm",
   "transformers==4.51.3",
+  "wandb",
 ]
 
 [project.optional-dependencies]

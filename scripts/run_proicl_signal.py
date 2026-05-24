@@ -110,6 +110,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--sps-rollout-horizon", type=int, default=None)
     parser.add_argument("--num-shards", type=int, default=8)
     parser.add_argument("--memory-num-shards", type=int, default=1)
+    parser.add_argument("--max-parallel-cells", type=int, default=None)
+    parser.add_argument("--smoke-max-parallel-cells", type=int, default=1)
     parser.add_argument("--gpus", nargs="+", default=None)
     parser.add_argument("--backend", choices=["hf", "vllm"], default="hf")
     parser.add_argument("--vllm-dtype", default="float32")
@@ -157,6 +159,11 @@ def _parse_args() -> argparse.Namespace:
         "--skip-aggregate",
         action="store_true",
         help="Do not aggregate after this worker finishes. Use for partition workers.",
+    )
+    parser.add_argument(
+        "--overlap-gepa-and-cells",
+        action="store_true",
+        help="Overlap GEPA archive construction with direct baseline cells.",
     )
     return parser.parse_args()
 
@@ -770,6 +777,11 @@ def main() -> None:
     args.root.mkdir(parents=True, exist_ok=True)
     env = _setup_env(args)
     gpus = _visible_gpus(args)
+    max_parallel_cells = args.max_parallel_cells or len(gpus)
+    max_parallel_cells = max(1, min(max_parallel_cells, len(gpus)))
+    worker_pool_gpus = gpus[:max_parallel_cells]
+    smoke_parallel_cells = max(1, min(args.smoke_max_parallel_cells, len(worker_pool_gpus)))
+    smoke_gpus = worker_pool_gpus[:smoke_parallel_cells]
     (args.root / "logs").mkdir(parents=True, exist_ok=True)
 
     _prefetch_models(args, env)
@@ -799,7 +811,7 @@ def main() -> None:
             rollout_budget=2,
             num_shards=1,
             memory_num_shards=1,
-            gpus=gpus[: min(len(gpus), 6)],
+            gpus=smoke_gpus,
             run_stage="smoke",
         )
         if args.smoke_only:
@@ -844,7 +856,9 @@ def main() -> None:
         )
 
     gepa_gpu = gpus[0]
-    worker_gpus = gpus[1:] if len(gpus) > 1 else gpus
+    worker_gpus = worker_pool_gpus
+    if args.overlap_gepa_and_cells and len(gpus) > 1:
+        worker_gpus = gpus[1 : 1 + max_parallel_cells]
     gepa_proc = _start_gepa_archive(
         args=args,
         env=env,
@@ -860,7 +874,7 @@ def main() -> None:
     )
     direct_cells = [cell for cell in partitioned_all_cells if not cell.uses_gepa_archive and not cell.uses_memory]
     dependent_cells = [cell for cell in partitioned_all_cells if cell.uses_gepa_archive or cell.uses_memory]
-    if gepa_proc is not None and len(gpus) > 1:
+    if gepa_proc is not None and args.overlap_gepa_and_cells and len(gpus) > 1:
         append_event(events, "overlap_direct_cells_start", gepa_gpu=gepa_gpu, worker_gpus=worker_gpus)
         _run_cell_list(
             args=args,
@@ -879,14 +893,14 @@ def main() -> None:
     append_event(events, "gepa_archive_ready", gpu=gepa_gpu)
     remaining_cells = (
         dependent_cells
-        if gepa_proc is not None and len(gpus) > 1
+        if gepa_proc is not None and args.overlap_gepa_and_cells and len(gpus) > 1
         else partitioned_all_cells
     )
     _run_cell_list(
         args=args,
         env=env,
         cells=remaining_cells,
-        gpus=gpus,
+        gpus=worker_pool_gpus,
         events=events,
         root=full_root,
         tracks=args.tracks,
