@@ -39,6 +39,7 @@ Environment knobs:
   SKIP_SPS_MATH500_CALIBRATION=1 Skip the SPS-vs-MCMC MATH500 gate.
   SMOKE_ONLY=1             Run only the harness smoke.
   INCLUDE_CANDIDATES=1     Include candidates.jsonl in the final bundle.
+  PROICL_DISABLE_TQDM=1    Use plain progress lines instead of tqdm.
 EOF
 }
 
@@ -275,12 +276,18 @@ run_cmd() {
   fi
 }
 
+section() {
+  echo
+  echo "==> $*"
+}
+
 if [[ "$DRY_RUN" != "1" && ! -f pyproject.toml ]]; then
   echo "Run this script from the ProICL repository root." >&2
   exit 1
 fi
 
 if [[ "$DRY_RUN" != "1" && "$SKIP_INSTALL" != "1" ]]; then
+  section "Installing ProICL dependencies ($INSTALL_PROFILE profile)"
   if [[ "$PY" == "python" ]]; then
     run_cmd python -m venv "$VENV"
     PY="$REPO_ROOT/$VENV/bin/python"
@@ -288,20 +295,21 @@ if [[ "$DRY_RUN" != "1" && "$SKIP_INSTALL" != "1" ]]; then
   run_cmd "$PY" -m pip install -U pip wheel setuptools
   case "$INSTALL_PROFILE" in
     light)
-      run_cmd "$PY" -m pip install -e .
+      run_cmd "$PY" -m pip install -r requirements-light.txt
       ;;
     full)
       run_cmd "$PY" -m pip install -e ".[code,dc,gepa_reflection]"
+      run_cmd "$PY" -m pip install "vllm==0.9.2"
       ;;
     *)
       echo "INSTALL_PROFILE must be light or full; got $INSTALL_PROFILE" >&2
       exit 1
       ;;
   esac
-  run_cmd "$PY" -m pip install "vllm==0.9.2"
 fi
 
 if [[ "$DRY_RUN" != "1" ]]; then
+  section "Checking CUDA GPU host"
   if ! command -v nvidia-smi >/dev/null 2>&1; then
     echo "nvidia-smi not found; this run needs a CUDA GPU host." >&2
     exit 1
@@ -316,6 +324,7 @@ if [[ "$SKIP_CALIBRATION" == "1" && -z "${VLLM_PARITY_ARTIFACT:-}" ]]; then
 fi
 
 if [[ -z "${VLLM_PARITY_ARTIFACT:-}" && ! -f "$CALIB_ARTIFACT" ]]; then
+  section "Running vLLM/HF calibration"
   run_cmd "$PY" scripts/vllm_hf_calibration.py \
     --model-key deepseek-r1-distill-qwen-1.5b \
     --out "$CALIB_DIR" \
@@ -330,6 +339,7 @@ fi
 
 SPS_CALIB_DIR="$RUN_ROOT/calibration/sps_vs_mcmc_math500"
 if [[ "$SKIP_SPS_MATH500_CALIBRATION" != "1" && "$SMOKE_ONLY" != "1" ]]; then
+  section "Running SPS-vs-MCMC calibration"
   run_cmd "$PY" scripts/calibrate_sps.py \
     --out "$SPS_CALIB_DIR" \
     --model-key deepseek-r1-distill-qwen-1.5b \
@@ -401,6 +411,7 @@ if [[ -n "${VLLM_MAX_MODEL_LEN:-}" ]]; then
   MAIN_CMD+=(--vllm-max-model-len "$VLLM_MAX_MODEL_LEN")
 fi
 
+section "Running ProICL held-out experiment"
 RUN_MARKER="$RUN_ROOT/.launch_marker"
 if [[ "$DRY_RUN" != "1" ]]; then
   mkdir -p "$RUN_ROOT"

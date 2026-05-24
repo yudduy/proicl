@@ -143,6 +143,47 @@ def append_event(path: Path, event: str, **payload: Any) -> None:
         f.write(json.dumps(row, sort_keys=True) + "\n")
 
 
+class _PlainProgress:
+    def __init__(self, *, total: int, initial: int, desc: str) -> None:
+        self.total = total
+        self.n = initial
+        self.desc = desc
+        if total:
+            print(f"{desc}: {self.n}/{self.total} cells", flush=True)
+
+    def update(self, n: int = 1) -> None:
+        self.n += n
+        print(f"{self.desc}: {self.n}/{self.total} cells", flush=True)
+
+    def set_postfix_str(self, value: str, refresh: bool = True) -> None:
+        if value:
+            print(f"{self.desc}: {value}", flush=True)
+
+    def write(self, value: str) -> None:
+        print(value, flush=True)
+
+    def close(self) -> None:
+        return
+
+
+def _make_progress(*, total: int, initial: int, desc: str):
+    if os.environ.get("PROICL_DISABLE_TQDM") == "1":
+        return _PlainProgress(total=total, initial=initial, desc=desc)
+    try:
+        from tqdm.auto import tqdm
+    except Exception:
+        return _PlainProgress(total=total, initial=initial, desc=desc)
+    return tqdm(total=total, initial=initial, desc=desc, unit="cell", dynamic_ncols=True)
+
+
+def _progress_write(progress: Any, message: str) -> None:
+    writer = getattr(progress, "write", None)
+    if callable(writer):
+        writer(message)
+    else:
+        print(message, flush=True)
+
+
 def source_hash(repo_root: Path) -> str:
     h = hashlib.sha256()
     roots = ["src", "scripts", "docs", "tests", "configs", "TODO.PROICL.md", "pyproject.toml"]
@@ -518,94 +559,117 @@ def run_cells(
     active: list[tuple[subprocess.Popen, LaunchCell, str]] = []
     available_gpus = list(gpus)
     failures: list[dict[str, Any]] = []
-    while queue or active:
-        while queue and available_gpus:
-            cell = queue.pop(0)
-            gpu = available_gpus.pop(0)
-            out = Path(cell.artifact_dir)
-            if out.exists():
-                shutil.rmtree(out)
-            out.mkdir(parents=True, exist_ok=True)
-            write_json(out / "proicl_launch_cell.json", cell.to_jsonable())
-            cmd = run_condition_command(
-                repo_root=repo_root,
-                cell=cell,
-                backend=backend,
-                local_files_only=local_files_only,
-                polaris_source_hash=polaris_hash,
-                cost_cap_dollars=cost_cap_dollars,
-                estimated_dollar_cost=estimated_dollar_cost,
-                estimated_wall_clock_seconds=estimated_wall_clock_seconds,
-                run_kind=run_kind,
-                run_stage=run_stage,
-                max_new_tokens=max_new_tokens,
-                power_sampler=power_sampler,
-                mcmc_steps=mcmc_steps,
-                mcmc_block_num=mcmc_block_num,
-                sps_top_k=sps_top_k,
-                sps_candidate_pool_size=sps_candidate_pool_size,
-                sps_rollouts_per_candidate=sps_rollouts_per_candidate,
-                sps_rollout_horizon=sps_rollout_horizon,
-                vllm_dtype=vllm_dtype,
-                vllm_model_impl=vllm_model_impl,
-                vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
-                vllm_max_model_len=vllm_max_model_len,
-                vllm_scoring_mode=vllm_scoring_mode,
-                vllm_parity_artifact=vllm_parity_artifact,
-                vllm_enable_prefix_caching=vllm_enable_prefix_caching,
-            )
-            env = os.environ.copy()
-            env["CUDA_VISIBLE_DEVICES"] = gpu
-            env.setdefault("TOKENIZERS_PARALLELISM", "false")
-            env.setdefault("PYTHONDONTWRITEBYTECODE", "1")
-            env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-            append_event(
-                events_path,
-                "cell_start",
-                gpu=gpu,
-                track=cell.track,
-                condition=cell.proicl_condition,
-                shard=cell.shard_id,
-            )
-            stdout = (out / "stdout.json").open("w", encoding="utf-8")
-            stderr = (out / "stderr.log").open("w", encoding="utf-8")
-            proc = subprocess.Popen(cmd, cwd=repo_root, env=env, stdout=stdout, stderr=stderr)
-            stdout.close()
-            stderr.close()
-            active.append((proc, cell, gpu))
-        time.sleep(2)
-        still_active: list[tuple[subprocess.Popen, LaunchCell, str]] = []
-        for proc, cell, gpu in active:
-            rc = proc.poll()
-            if rc is None:
-                still_active.append((proc, cell, gpu))
-                continue
-            if rc == 0 and cell_complete(cell):
-                available_gpus.append(gpu)
+    progress = _make_progress(total=len(cells), initial=skipped, desc="ProICL cells")
+    if skipped:
+        _progress_write(progress, f"[ProICL] skipped {skipped} completed cells")
+    try:
+        while queue or active:
+            while queue and available_gpus:
+                cell = queue.pop(0)
+                gpu = available_gpus.pop(0)
+                out = Path(cell.artifact_dir)
+                if out.exists():
+                    shutil.rmtree(out)
+                out.mkdir(parents=True, exist_ok=True)
+                write_json(out / "proicl_launch_cell.json", cell.to_jsonable())
+                cmd = run_condition_command(
+                    repo_root=repo_root,
+                    cell=cell,
+                    backend=backend,
+                    local_files_only=local_files_only,
+                    polaris_source_hash=polaris_hash,
+                    cost_cap_dollars=cost_cap_dollars,
+                    estimated_dollar_cost=estimated_dollar_cost,
+                    estimated_wall_clock_seconds=estimated_wall_clock_seconds,
+                    run_kind=run_kind,
+                    run_stage=run_stage,
+                    max_new_tokens=max_new_tokens,
+                    power_sampler=power_sampler,
+                    mcmc_steps=mcmc_steps,
+                    mcmc_block_num=mcmc_block_num,
+                    sps_top_k=sps_top_k,
+                    sps_candidate_pool_size=sps_candidate_pool_size,
+                    sps_rollouts_per_candidate=sps_rollouts_per_candidate,
+                    sps_rollout_horizon=sps_rollout_horizon,
+                    vllm_dtype=vllm_dtype,
+                    vllm_model_impl=vllm_model_impl,
+                    vllm_gpu_memory_utilization=vllm_gpu_memory_utilization,
+                    vllm_max_model_len=vllm_max_model_len,
+                    vllm_scoring_mode=vllm_scoring_mode,
+                    vllm_parity_artifact=vllm_parity_artifact,
+                    vllm_enable_prefix_caching=vllm_enable_prefix_caching,
+                )
+                env = os.environ.copy()
+                env["CUDA_VISIBLE_DEVICES"] = gpu
+                env.setdefault("TOKENIZERS_PARALLELISM", "false")
+                env.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+                env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
                 append_event(
                     events_path,
-                    "cell_done",
+                    "cell_start",
                     gpu=gpu,
                     track=cell.track,
                     condition=cell.proicl_condition,
                     shard=cell.shard_id,
                 )
-            else:
-                available_gpus.append(gpu)
-                failure = {
-                    "track": cell.track,
-                    "condition": cell.proicl_condition,
-                    "shard": cell.shard_id,
-                    "returncode": rc,
-                    "artifact_dir": cell.artifact_dir,
-                }
-                failures.append(failure)
-                append_event(events_path, "cell_failed", **failure)
-                if stop_on_failure:
-                    for live, _, _ in still_active:
-                        live.terminate()
-                    raise RuntimeError(f"ProICL cell failed: {failure}")
-        active = still_active
+                progress.set_postfix_str(
+                    f"gpu={gpu} start {cell.track}/{cell.proicl_condition}/shard-{cell.shard_id}",
+                    refresh=True,
+                )
+                _progress_write(
+                    progress,
+                    "[ProICL] start "
+                    f"gpu={gpu} track={cell.track} condition={cell.proicl_condition} "
+                    f"shard={cell.shard_id}/{cell.num_shards} log={out / 'stderr.log'}",
+                )
+                stdout = (out / "stdout.json").open("w", encoding="utf-8")
+                stderr = (out / "stderr.log").open("w", encoding="utf-8")
+                proc = subprocess.Popen(cmd, cwd=repo_root, env=env, stdout=stdout, stderr=stderr)
+                stdout.close()
+                stderr.close()
+                active.append((proc, cell, gpu))
+            time.sleep(2)
+            still_active: list[tuple[subprocess.Popen, LaunchCell, str]] = []
+            for proc, cell, gpu in active:
+                rc = proc.poll()
+                if rc is None:
+                    still_active.append((proc, cell, gpu))
+                    continue
+                if rc == 0 and cell_complete(cell):
+                    available_gpus.append(gpu)
+                    progress.update(1)
+                    progress.set_postfix_str(
+                        f"gpu={gpu} done {cell.track}/{cell.proicl_condition}/shard-{cell.shard_id}",
+                        refresh=True,
+                    )
+                    append_event(
+                        events_path,
+                        "cell_done",
+                        gpu=gpu,
+                        track=cell.track,
+                        condition=cell.proicl_condition,
+                        shard=cell.shard_id,
+                    )
+                else:
+                    available_gpus.append(gpu)
+                    progress.update(1)
+                    failure = {
+                        "track": cell.track,
+                        "condition": cell.proicl_condition,
+                        "shard": cell.shard_id,
+                        "returncode": rc,
+                        "artifact_dir": cell.artifact_dir,
+                    }
+                    failures.append(failure)
+                    append_event(events_path, "cell_failed", **failure)
+                    _progress_write(progress, f"[ProICL] failed {failure}")
+                    if stop_on_failure:
+                        for live, _, _ in still_active:
+                            live.terminate()
+                        raise RuntimeError(f"ProICL cell failed: {failure}")
+            active = still_active
+    finally:
+        progress.close()
     append_event(events_path, "queue_done", failures=len(failures))
     if failures:
         raise RuntimeError(f"ProICL queue had failures: {failures}")

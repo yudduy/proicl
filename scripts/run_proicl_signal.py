@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -519,10 +520,49 @@ def _start_gepa_archive(
         reflection_max_new_tokens=reflection_max_new_tokens,
         cuda_visible_devices=cuda_visible_devices,
     )
+    print(
+        "[ProICL] started GEPA archive build "
+        f"gpu={cuda_visible_devices} stderr={stderr.name}",
+        flush=True,
+    )
     proc = subprocess.Popen(cmd, cwd=REPO_ROOT, env=env, stdout=stdout, stderr=stderr)
     stdout.close()
     stderr.close()
     return proc
+
+
+def _wait_for_gepa_archive(
+    proc: subprocess.Popen | None,
+    *,
+    events: Path,
+    gpu: str,
+    heartbeat_seconds: int = 60,
+) -> int:
+    if proc is None:
+        return 0
+    started = time.monotonic()
+    next_heartbeat = started
+    while True:
+        rc = proc.poll()
+        elapsed = int(time.monotonic() - started)
+        if rc is not None:
+            print(
+                f"[ProICL] GEPA archive build finished rc={rc} elapsed={elapsed}s gpu={gpu}",
+                flush=True,
+            )
+            return int(rc)
+        now = time.monotonic()
+        if now >= next_heartbeat:
+            append_payload = {"gpu": gpu, "elapsed_seconds": elapsed}
+            from polaris.proicl.launcher import append_event
+
+            append_event(events, "gepa_archive_heartbeat", **append_payload)
+            print(
+                f"[ProICL] GEPA archive build still running elapsed={elapsed}s gpu={gpu}",
+                flush=True,
+            )
+            next_heartbeat = now + heartbeat_seconds
+        time.sleep(min(5, heartbeat_seconds))
 
 
 def _run_cells_for_root(
@@ -832,7 +872,7 @@ def main() -> None:
             tracks=args.tracks,
             run_stage=args.run_stage,
         )
-    rc = gepa_proc.wait() if gepa_proc is not None else 0
+    rc = _wait_for_gepa_archive(gepa_proc, events=events, gpu=gepa_gpu)
     if rc != 0:
         append_event(events, "gepa_archive_failed", returncode=rc)
         raise RuntimeError(f"GEPA archive build failed with return code {rc}")
