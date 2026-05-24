@@ -77,6 +77,17 @@ def _first_mismatch(left: list[int], right: list[int]) -> int | None:
     return None
 
 
+def _env_positive_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
 class VLLMForcedTokenProcessor:
     """Record target-token logprobs, then force that token for decode."""
 
@@ -927,6 +938,32 @@ class VLLMGenerator:
         """
         if not prompt_texts:
             return []
+        max_chains_per_batch = _env_positive_int("PROICL_SPS_CHAIN_BATCH_SIZE", 0)
+        if max_chains_per_batch > 0 and len(prompt_texts) > max_chains_per_batch:
+            generations: list[Generation] = []
+            if seed_offsets is None:
+                offsets = list(range(len(prompt_texts)))
+            else:
+                offsets = [int(x) for x in seed_offsets]
+                if len(offsets) != len(prompt_texts):
+                    raise ValueError("seed_offsets length must match prompt_texts length")
+            for start in range(0, len(prompt_texts), max_chains_per_batch):
+                stop = start + max_chains_per_batch
+                generations.extend(
+                    self.generate_sps_power_batch(
+                        prompt_texts[start:stop],
+                        temperature=temperature,
+                        max_new_tokens=max_new_tokens,
+                        block_num=block_num,
+                        top_k=top_k,
+                        candidate_pool_size=candidate_pool_size,
+                        rollouts_per_candidate=rollouts_per_candidate,
+                        rollout_horizon=rollout_horizon,
+                        seed_base=seed_base,
+                        seed_offsets=offsets[start:stop],
+                    )
+                )
+            return generations
         if block_num <= 0:
             raise ValueError(f"block_num must be > 0, got {block_num}")
         if max_new_tokens < 0:

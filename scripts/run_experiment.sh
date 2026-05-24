@@ -24,6 +24,7 @@ Environment knobs:
   ROLLOUT_BUDGET           Samples per non-greedy condition. Default: 8
   NUM_SHARDS               Per-condition shards. Default: detected GPU count, at least 1
   GPUS                     Optional comma-separated GPU ids; sets CUDA_VISIBLE_DEVICES.
+  GPU_MEMORY_MIB           Optional comma-separated GPU memory override for dry runs/tests.
   MAX_NEW_TOKENS           Generation cap. Default: 1024
   SPS_BLOCK_SIZE           Target SPS block size. Default: 192
   SPS_BLOCK_NUM            Override computed SPS block count.
@@ -31,12 +32,13 @@ Environment knobs:
   SPS_CANDIDATE_POOL_SIZE  Candidate blocks sampled per SPS step. Default: 8
   SPS_ROLLOUTS_PER_CANDIDATE Lookahead rollouts per candidate. Default: 8
   SPS_ROLLOUT_HORIZON      Lookahead horizon tokens. Default: 128
+  SPS_CHAIN_BATCH_SIZE     Archive-prompt SPS chains per vLLM batch. Default: GPU-aware.
   GPU_PROFILE              auto, a100, h100, or generic. Default: auto
   VLLM_PARITY_ARTIFACT     Existing calibration_summary.json. If unset, calibration is run.
   SKIP_INSTALL=1           Reuse the current environment.
   INSTALL_PROFILE          standard or full. Default: standard.
   SKIP_CALIBRATION=1       Require VLLM_PARITY_ARTIFACT instead of running calibration.
-  SKIP_SPS_MATH500_CALIBRATION=1 Skip the SPS-vs-MCMC MATH500 gate.
+  SKIP_SPS_MATH500_CALIBRATION=0 Run the slow SPS-vs-MCMC MATH500 gate. Default: skipped.
   SMOKE_ONLY=1             Run only the harness smoke.
   INCLUDE_CANDIDATES=1     Include candidates.jsonl in the final bundle.
   PROICL_DISABLE_TQDM=1    Use plain progress lines instead of tqdm.
@@ -55,7 +57,7 @@ DRY_RUN="${DRY_RUN:-0}"
 SKIP_INSTALL="${SKIP_INSTALL:-0}"
 INSTALL_PROFILE="${INSTALL_PROFILE:-standard}"
 SKIP_CALIBRATION="${SKIP_CALIBRATION:-0}"
-SKIP_SPS_MATH500_CALIBRATION="${SKIP_SPS_MATH500_CALIBRATION:-0}"
+SKIP_SPS_MATH500_CALIBRATION="${SKIP_SPS_MATH500_CALIBRATION:-1}"
 SMOKE_ONLY="${SMOKE_ONLY:-0}"
 INCLUDE_CANDIDATES="${INCLUDE_CANDIDATES:-0}"
 
@@ -127,10 +129,62 @@ detect_gpu_profile() {
   esac
 }
 
+detect_gpu_names() {
+  if [[ -n "${GPU_NAMES:-}" ]]; then
+    tr '\n' ';' <<<"$GPU_NAMES" | sed 's/;*$//'
+    return
+  fi
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader 2>/dev/null \
+      | paste -sd ';' - || true
+    return
+  fi
+  echo "unknown"
+}
+
+detect_min_gpu_memory_mib() {
+  if [[ -n "${GPU_MEMORY_MIB:-}" ]]; then
+    awk -F',' '
+      { for (i = 1; i <= NF; i++) { gsub(/[^0-9]/, "", $i); if ($i + 0 > 0 && (min == 0 || $i + 0 < min)) min = $i + 0 } }
+      END { print min + 0 }
+    ' <<<"$GPU_MEMORY_MIB"
+    return
+  fi
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi --query-gpu=index,memory.total --format=csv,noheader,nounits 2>/dev/null \
+      | awk -v selected="${CUDA_VISIBLE_DEVICES:-}" -F',' '
+          BEGIN {
+            n = split(selected, parts, ",")
+            numeric_selected = 0
+            for (i = 1; i <= n; i++) {
+              gsub(/^ +| +$/, "", parts[i])
+              if (parts[i] ~ /^[0-9]+$/) {
+                wanted[parts[i]] = 1
+                numeric_selected = 1
+              }
+            }
+          }
+          {
+            idx = $1
+            mem = $2
+            gsub(/^ +| +$/, "", idx)
+            gsub(/[^0-9]/, "", mem)
+            if (numeric_selected && !(idx in wanted)) next
+            if (mem + 0 > 0 && (min == 0 || mem + 0 < min)) min = mem + 0
+          }
+          END { print min + 0 }
+        '
+    return
+  fi
+  echo 0
+}
+
 GPU_COUNT="$(detect_gpu_count)"
 if [[ "$GPU_COUNT" -lt 1 ]]; then
   GPU_COUNT=1
 fi
+GPU_NAMES_DETECTED="$(detect_gpu_names)"
+GPU_MIN_MEMORY_MIB="$(detect_min_gpu_memory_mib)"
 NUM_SHARDS="${NUM_SHARDS:-$GPU_COUNT}"
 GPU_PROFILE="${GPU_PROFILE:-auto}"
 if [[ "$GPU_PROFILE" == "auto" ]]; then
@@ -141,16 +195,19 @@ case "$GPU_PROFILE" in
     DEFAULT_VLLM_GPU_MEMORY_UTILIZATION="0.88"
     DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.60"
     DEFAULT_WALL_CLOCK_SECONDS_PER_CELL="3600"
+    DEFAULT_SPS_CHAIN_BATCH_SIZE="2"
     ;;
   a100)
     DEFAULT_VLLM_GPU_MEMORY_UTILIZATION="0.85"
     DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.55"
     DEFAULT_WALL_CLOCK_SECONDS_PER_CELL="7200"
+    DEFAULT_SPS_CHAIN_BATCH_SIZE="2"
     ;;
   generic)
     DEFAULT_VLLM_GPU_MEMORY_UTILIZATION="0.80"
     DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.50"
     DEFAULT_WALL_CLOCK_SECONDS_PER_CELL="7200"
+    DEFAULT_SPS_CHAIN_BATCH_SIZE="1"
     ;;
   *)
     echo "GPU_PROFILE must be one of auto, a100, h100, generic; got $GPU_PROFILE" >&2
@@ -158,9 +215,16 @@ case "$GPU_PROFILE" in
     ;;
 esac
 
+if [[ "$GPU_MIN_MEMORY_MIB" -gt 0 && "$GPU_MIN_MEMORY_MIB" -lt 60000 ]]; then
+  DEFAULT_VLLM_GPU_MEMORY_UTILIZATION="0.80"
+  DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.50"
+  DEFAULT_SPS_CHAIN_BATCH_SIZE="1"
+fi
+
 ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL="${ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL:-$DEFAULT_WALL_CLOCK_SECONDS_PER_CELL}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-$DEFAULT_VLLM_GPU_MEMORY_UTILIZATION}"
 CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="${CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION:-$DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION}"
+SPS_CHAIN_BATCH_SIZE="${SPS_CHAIN_BATCH_SIZE:-$DEFAULT_SPS_CHAIN_BATCH_SIZE}"
 PARALLELISM_STRATEGY="one cell worker per visible GPU; GEPA/archive build reserves GPU 0 while direct baseline cells overlap on remaining GPUs"
 
 CACHE_ROOT="${PROICL_CACHE_ROOT:-$REPO_ROOT/.cache/proicl}"
@@ -192,6 +256,8 @@ out = sys.argv[1]
 payload = {
     "schema": "proicl_launch_config.v1",
     "gpu_profile": os.environ["PROICL_GPU_PROFILE"],
+    "gpu_names": os.environ.get("PROICL_GPU_NAMES", "unknown"),
+    "gpu_min_memory_mib": int(os.environ.get("PROICL_GPU_MIN_MEMORY_MIB", "0")),
     "gpu_count": int(os.environ["PROICL_GPU_COUNT"]),
     "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
     "num_shards": int(os.environ["PROICL_NUM_SHARDS"]),
@@ -223,6 +289,7 @@ payload = {
         "candidate_pool_size": int(os.environ["PROICL_SPS_CANDIDATE_POOL_SIZE"]),
         "rollouts_per_candidate": int(os.environ["PROICL_SPS_ROLLOUTS_PER_CANDIDATE"]),
         "rollout_horizon": int(os.environ["PROICL_SPS_ROLLOUT_HORIZON"]),
+        "chain_batch_size": int(os.environ["PROICL_SPS_CHAIN_BATCH_SIZE"]),
     },
 }
 with open(out, "w", encoding="utf-8") as f:
@@ -234,12 +301,17 @@ PY
 print_launch_summary() {
   echo "ProICL launch profile:"
   echo "  gpu_profile=$GPU_PROFILE gpu_count=$GPU_COUNT cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-all}"
+  echo "  gpu_names=$GPU_NAMES_DETECTED"
+  echo "  gpu_min_memory_mib=$GPU_MIN_MEMORY_MIB"
   echo "  num_shards=$NUM_SHARDS strategy=$PARALLELISM_STRATEGY"
   echo "  vllm_gpu_memory_utilization=$VLLM_GPU_MEMORY_UTILIZATION calibration=$CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION"
+  echo "  sps_chain_batch_size=$SPS_CHAIN_BATCH_SIZE"
   echo "  estimated_wall_clock_seconds_per_cell=$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
 }
 
 export PROICL_GPU_PROFILE="$GPU_PROFILE"
+export PROICL_GPU_NAMES="$GPU_NAMES_DETECTED"
+export PROICL_GPU_MIN_MEMORY_MIB="$GPU_MIN_MEMORY_MIB"
 export PROICL_GPU_COUNT="$GPU_COUNT"
 export PROICL_NUM_SHARDS="$NUM_SHARDS"
 export PROICL_PARALLELISM_STRATEGY="$PARALLELISM_STRATEGY"
@@ -261,6 +333,7 @@ export PROICL_SPS_TOP_K="$SPS_TOP_K"
 export PROICL_SPS_CANDIDATE_POOL_SIZE="$SPS_CANDIDATE_POOL_SIZE"
 export PROICL_SPS_ROLLOUTS_PER_CANDIDATE="$SPS_ROLLOUTS_PER_CANDIDATE"
 export PROICL_SPS_ROLLOUT_HORIZON="$SPS_ROLLOUT_HORIZON"
+export PROICL_SPS_CHAIN_BATCH_SIZE="$SPS_CHAIN_BATCH_SIZE"
 
 print_launch_summary
 if [[ "$DRY_RUN" != "1" ]]; then

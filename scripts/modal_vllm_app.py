@@ -1000,6 +1000,183 @@ print("PROICL_JSON:" + json.dumps(summary, sort_keys=True))
     return summary
 
 
+def _smoke_archive_sps_one_problem_vllm_impl(
+    *,
+    scoring_mode: str = "forced_decode_v0",
+    max_new_tokens: int = 64,
+    sps_top_k: int = 2,
+    sps_candidate_pool_size: int = 2,
+    sps_rollouts_per_candidate: int = 1,
+    sps_rollout_horizon: int = 16,
+    sps_chain_batch_size: int = 1,
+    estimated_dollar_cost: float | None = None,
+    cost_cap_dollars: float | None = None,
+    user_authorized_paid_run: bool = False,
+) -> dict:
+    """Run the archive-conditioned SPS path that backs gepa_sps_fixed."""
+    _setup_paths()
+    from polaris.registry import resolve_model
+
+    model = resolve_model("deepseek-r1-distill-qwen-1.5b")
+    model_id = model.hf_id
+    model_revision = model.revision
+    _require_modal_preflight(
+        backend="vllm",
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+        artifact_dir="/tmp/proicl-archive-sps-smoke",
+        model_id=model_id,
+    )
+    _ensure_model_cached(model_id, revision=model_revision)
+    summary = _run_python_json(
+        f"""
+import json
+import os
+import subprocess
+from pathlib import Path
+
+root = Path("/tmp/proicl-archive-sps-smoke")
+root.mkdir(parents=True, exist_ok=True)
+archive = root / "archive.json"
+archive.write_text(json.dumps({{
+    "entries": [
+        {{
+            "id": "prompt_a",
+            "prefix": "Solve carefully. Track every state transition. ",
+            "suffix": "\\nReturn the final answer only after checking constraints.",
+            "descriptor_hint": "state_tracking",
+        }},
+        {{
+            "id": "prompt_b",
+            "prefix": "Use a compact step-by-step plan and verify each move. ",
+            "suffix": "\\nMake sure the answer satisfies the task verifier.",
+            "descriptor_hint": "constraint_verification",
+        }},
+    ],
+    "cell_fitness": {{}},
+}}, sort_keys=True), encoding="utf-8")
+calibration = root / "calibration"
+subprocess.run(
+    [
+        "python",
+        "/proicl/scripts/vllm_hf_calibration.py",
+        "--model-id",
+        {model_id!r},
+        "--model-revision",
+        {model_revision!r},
+        "--out",
+        str(calibration),
+        "--temperature",
+        "0.25",
+        "--hf-dtype",
+        "float32",
+        "--hf-scoring-mode",
+        "cached_decode",
+        "--segment-lens",
+        "1",
+        "2",
+        "8",
+        "--vllm-scoring-mode",
+        {scoring_mode!r},
+        "--vllm-dtype",
+        "float32",
+        "--vllm-model-impl",
+        "transformers",
+        "--vllm-max-model-len",
+        "4096",
+        "--vllm-gpu-memory-utilization",
+        "0.50",
+    ],
+    check=True,
+    text=True,
+)
+out = root / "run"
+cmd = [
+    "python",
+    "/proicl/scripts/run_condition.py",
+    "--track",
+    "reasoning_gym_boxnet",
+    "--model-key",
+    "deepseek-r1-distill-qwen-1.5b",
+    "--model-revision",
+    {model_revision!r},
+    "--condition",
+    "full_archive_fixed",
+    "--archive",
+    str(archive),
+    "--split",
+    "20",
+    "21",
+    "--seed",
+    "17",
+    "--proicl-source-hash",
+    "modal-archive-sps-smoke",
+    "--preregistration-anchor",
+    "TODO.PROICL.md#proicl-fast-weight-recovery-audit",
+    "--out",
+    str(out),
+    "--backend",
+    "vllm",
+    "--samples-per-problem",
+    "2",
+    "--max-new-tokens",
+    str({int(max_new_tokens)}),
+    "--sps-block-num",
+    "2",
+    "--power-sampler",
+    "sps",
+    "--sps-top-k",
+    str({int(sps_top_k)}),
+    "--sps-candidate-pool-size",
+    str({int(sps_candidate_pool_size)}),
+    "--sps-rollouts-per-candidate",
+    str({int(sps_rollouts_per_candidate)}),
+    "--sps-rollout-horizon",
+    str({int(sps_rollout_horizon)}),
+    "--vllm-scoring-mode",
+    {scoring_mode!r},
+    "--vllm-dtype",
+    "float32",
+    "--vllm-model-impl",
+    "transformers",
+    "--vllm-max-model-len",
+    "4096",
+    "--vllm-gpu-memory-utilization",
+    "0.80",
+    "--vllm-parity-artifact",
+    str(calibration / "calibration_summary.json"),
+    "--run-stage",
+    "smoke",
+    "--run-kind",
+    "modal",
+]
+env = os.environ.copy()
+env["PROICL_SPS_CHAIN_BATCH_SIZE"] = str({int(sps_chain_batch_size)})
+subprocess.run(cmd, check=True, text=True, env=env)
+metrics = json.loads((out / "metrics.json").read_text())
+manifest = json.loads((out / "manifest.json").read_text())
+candidates = [
+    json.loads(line)
+    for line in (out / "candidates.jsonl").read_text().splitlines()
+    if line.strip()
+]
+summary = {{
+    "passed": metrics.get("n_problems") == 1 and metrics.get("n_candidates") == 2,
+    "metrics": metrics,
+    "n_candidates_jsonl": len(candidates),
+    "prompt_ids": sorted({{row.get("prompt_id") for row in candidates}}),
+    "sps_chain_batch_size": {int(sps_chain_batch_size)},
+    "serving_backend": manifest.get("config", {{}}).get("serving_backend"),
+    "artifact_dir": str(out),
+}}
+print("PROICL_JSON:" + json.dumps(summary, sort_keys=True))
+"""
+    )
+    print(f"smoke_archive_sps_one_problem_vllm: {summary}")
+    return summary
+
+
 @app.function(
     gpu="H100",
     timeout=3600,
@@ -1207,3 +1384,118 @@ def smoke_experiment_one_problem_h100(
         cost_cap_dollars=cost_cap_dollars,
         user_authorized_paid_run=user_authorized_paid_run,
     )
+
+
+@app.function(
+    gpu="A100-40GB",
+    timeout=3600,
+    volumes={"/cache/huggingface": hf_cache},
+)
+def smoke_archive_sps_one_problem_a100_40gb(
+    max_new_tokens: int = 64,
+    sps_top_k: int = 2,
+    sps_candidate_pool_size: int = 2,
+    sps_rollouts_per_candidate: int = 1,
+    sps_rollout_horizon: int = 16,
+    sps_chain_batch_size: int = 1,
+    estimated_dollar_cost: float | None = None,
+    cost_cap_dollars: float | None = None,
+    user_authorized_paid_run: bool = False,
+) -> dict:
+    """Run archive-conditioned SPS on a constrained 40GB GPU."""
+    _setup_paths()
+    _require_modal_preflight(
+        backend="vllm",
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+        artifact_dir="/tmp/proicl-archive-sps-smoke",
+        model_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+    )
+    return _smoke_archive_sps_one_problem_vllm_impl(
+        max_new_tokens=max_new_tokens,
+        sps_top_k=sps_top_k,
+        sps_candidate_pool_size=sps_candidate_pool_size,
+        sps_rollouts_per_candidate=sps_rollouts_per_candidate,
+        sps_rollout_horizon=sps_rollout_horizon,
+        sps_chain_batch_size=sps_chain_batch_size,
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+    )
+
+
+@app.function(
+    gpu="A100-40GB",
+    timeout=3600,
+    volumes={"/cache/huggingface": hf_cache},
+)
+def smoke_run_experiment_script_a100_40gb(
+    max_new_tokens: int = 64,
+    vllm_max_model_len: int = 2048,
+    estimated_dollar_cost: float | None = None,
+    cost_cap_dollars: float | None = None,
+    user_authorized_paid_run: bool = False,
+) -> dict:
+    """Run scripts/run_experiment.sh in SMOKE_ONLY mode on one constrained GPU."""
+    _setup_paths()
+    from polaris.registry import resolve_model
+
+    model = resolve_model("deepseek-r1-distill-qwen-1.5b")
+    _require_modal_preflight(
+        backend="vllm",
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+        artifact_dir="/tmp/proicl-run-experiment-smoke",
+        model_id=model.hf_id,
+    )
+    summary = _run_python_json(
+        f"""
+import json
+import os
+import subprocess
+from pathlib import Path
+
+env = os.environ.copy()
+env.update({{
+    "PYTHONPATH": "/proicl/src",
+    "RUN_ROOT": "/tmp/proicl-run-experiment-smoke",
+    "SMOKE_ONLY": "1",
+    "SKIP_INSTALL": "1",
+    "SKIP_SPS_MATH500_CALIBRATION": "1",
+    "GPUS": "0",
+    "GPU_PROFILE": "generic",
+    "SPS_CHAIN_BATCH_SIZE": "1",
+    "MAX_NEW_TOKENS": str({int(max_new_tokens)}),
+    "VLLM_MAX_MODEL_LEN": str({int(vllm_max_model_len)}),
+    "REFLECTION_PROVIDER": "local-hf",
+}})
+proc = subprocess.run(
+    ["bash", "/proicl/scripts/run_experiment.sh"],
+    cwd="/proicl",
+    env=env,
+    text=True,
+    capture_output=True,
+    timeout=3300,
+)
+run_root = Path("/tmp/proicl-run-experiment-smoke")
+launch_config = run_root / "launch_config.json"
+payload = {{
+    "passed": proc.returncode == 0,
+    "returncode": proc.returncode,
+    "stdout_tail": proc.stdout[-4000:],
+    "stderr_tail": proc.stderr[-4000:],
+    "launch_config": json.loads(launch_config.read_text()) if launch_config.exists() else None,
+}}
+if proc.returncode == 0:
+    bundles = sorted(run_root.rglob("results_bundle.tar.gz"))
+    payload["bundle_count"] = len(bundles)
+    payload["bundle_paths"] = [str(path) for path in bundles]
+print("PROICL_JSON:" + json.dumps(payload, sort_keys=True))
+if proc.returncode != 0:
+    raise SystemExit(proc.returncode)
+"""
+    )
+    print(f"smoke_run_experiment_script: {summary}")
+    return summary

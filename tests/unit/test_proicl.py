@@ -419,6 +419,51 @@ def test_proicl_launcher_reuses_the_gpu_that_finished(tmp_path, monkeypatch):
     assert not stale.exists()
 
 
+def test_proicl_launcher_failure_reports_stderr_tail(tmp_path, monkeypatch):
+    cell = build_signal_cells(
+        root=tmp_path / "proicl",
+        tracks=("reasoning_gym_boxnet",),
+        split=(20, 21),
+        rollout_budget=2,
+        num_shards=1,
+        memory_num_shards=1,
+    )[0]
+
+    class FakeProc:
+        def poll(self):
+            return 1
+
+    def fake_popen(cmd, *, cwd, env, stdout, stderr):
+        stderr.write("useful failure context\n")
+        stderr.flush()
+        return FakeProc()
+
+    monkeypatch.setattr(launcher_mod.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(launcher_mod.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        launcher_mod,
+        "run_condition_command",
+        lambda **kwargs: ["fake", kwargs["cell"].artifact_dir],
+    )
+    monkeypatch.setattr(launcher_mod, "cell_complete", lambda cell: False)
+
+    with pytest.raises(RuntimeError, match="useful failure context"):
+        run_cells(
+            repo_root=tmp_path,
+            cells=[cell],
+            gpus=["0"],
+            events_path=tmp_path / "events.jsonl",
+            backend="hf",
+            local_files_only=False,
+            cost_cap_dollars=1.0,
+            estimated_dollar_cost=0.1,
+            estimated_wall_clock_seconds=10,
+            run_kind="local",
+            run_stage="smoke",
+            max_new_tokens=8,
+        )
+
+
 def test_proicl_condition_command_propagates_vllm_scoring_mode(tmp_path):
     cell = build_signal_cells(
         root=tmp_path / "proicl",

@@ -184,6 +184,14 @@ def _progress_write(progress: Any, message: str) -> None:
         print(message, flush=True)
 
 
+def _tail_text(path: Path, *, max_chars: int = 4000) -> str:
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return text[-max_chars:]
+
+
 def source_hash(repo_root: Path) -> str:
     h = hashlib.sha256()
     roots = ["src", "scripts", "docs", "tests", "configs", "TODO.PROICL.md", "pyproject.toml"]
@@ -653,12 +661,14 @@ def run_cells(
                 else:
                     available_gpus.append(gpu)
                     progress.update(1)
+                    stderr_tail = _tail_text(Path(cell.artifact_dir) / "stderr.log")
                     failure = {
                         "track": cell.track,
                         "condition": cell.proicl_condition,
                         "shard": cell.shard_id,
                         "returncode": rc,
                         "artifact_dir": cell.artifact_dir,
+                        "stderr_tail": stderr_tail,
                     }
                     failures.append(failure)
                     append_event(events_path, "cell_failed", **failure)

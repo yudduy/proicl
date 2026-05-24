@@ -272,6 +272,76 @@ def test_vllm_generate_sps_power_batch_batches_candidates_and_rollouts(monkeypat
     assert all(out.estimated_dollar_cost > 0 for out in outs)
 
 
+def test_vllm_generate_sps_power_batch_respects_chain_microbatch(monkeypatch):
+    seen_batch_sizes = []
+
+    class FakeSamplingParams:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class FakeLLM:
+        def __init__(self, **kwargs):
+            pass
+
+        def generate(self, prompts, sampling_params, use_tqdm=False):
+            seen_batch_sizes.append(len(prompts))
+            outputs = []
+            for row_idx, (prompt, params) in enumerate(zip(prompts, sampling_params)):
+                token_ids = []
+                processor = params.logits_processors[0]
+                for _ in range(params.max_tokens):
+                    logits = torch.full((16,), -100.0)
+                    logits[(row_idx % 8) + 1] = 100.0
+                    logits = processor(prompt["prompt_token_ids"], token_ids, logits)
+                    token_ids.append(int(torch.argmax(logits).item()))
+                outputs.append(SimpleNamespace(outputs=[SimpleNamespace(token_ids=token_ids)]))
+            return outputs
+
+    class FakeTokenizer:
+        pad_token_id = 0
+        eos_token_id = 15
+
+        def encode(self, text):
+            return [1, len(text)]
+
+        def decode(self, token_ids, skip_special_tokens=True):
+            return ",".join(str(x) for x in token_ids)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        types.SimpleNamespace(
+            AutoTokenizer=types.SimpleNamespace(
+                from_pretrained=lambda *args, **kwargs: FakeTokenizer()
+            )
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm",
+        types.SimpleNamespace(LLM=FakeLLM, SamplingParams=FakeSamplingParams),
+    )
+    monkeypatch.setenv("PROICL_SPS_CHAIN_BATCH_SIZE", "1")
+    gen = VLLMGenerator(model_id="fake-model", seed=17, fused_sampling_recorder=True)
+
+    outs = gen.generate_sps_power_batch(
+        ["a", "bb"],
+        temperature=0.25,
+        max_new_tokens=4,
+        block_num=2,
+        top_k=2,
+        candidate_pool_size=2,
+        rollouts_per_candidate=2,
+        rollout_horizon=1,
+        seed_base=100,
+        seed_offsets=[0, 10],
+    )
+
+    assert max(seen_batch_sizes) == 4
+    assert seen_batch_sizes == [2, 4, 2, 2, 4, 2]
+    assert [out.generation_token_count for out in outs] == [4, 4]
+
+
 def test_vllm_score_segments_uses_forced_decode(monkeypatch):
     fake_llm_holder = {}
     seen_temperatures = []
