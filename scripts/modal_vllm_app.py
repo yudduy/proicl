@@ -1509,6 +1509,7 @@ def smoke_run_experiment_script_l40(
     user_authorized_paid_run: bool = False,
 ) -> dict:
     """Run scripts/run_experiment_l40.sh in SMOKE_ONLY mode on one Modal L40S."""
+    # _require_modal_preflight is enforced inside _smoke_run_experiment_script_impl.
     return _smoke_run_experiment_script_impl(
         profile_script="run_experiment_l40.sh",
         max_new_tokens=max_new_tokens,
@@ -1532,6 +1533,7 @@ def smoke_run_experiment_script_a100_40gb(
     user_authorized_paid_run: bool = False,
 ) -> dict:
     """Run scripts/run_experiment_a100.sh in SMOKE_ONLY mode on one A100-40GB."""
+    # _require_modal_preflight is enforced inside _smoke_run_experiment_script_impl.
     return _smoke_run_experiment_script_impl(
         profile_script="run_experiment_a100.sh",
         max_new_tokens=max_new_tokens,
@@ -1555,6 +1557,7 @@ def smoke_run_experiment_script_h100(
     user_authorized_paid_run: bool = False,
 ) -> dict:
     """Run scripts/run_experiment_h100.sh in SMOKE_ONLY mode on one H100."""
+    # _require_modal_preflight is enforced inside _smoke_run_experiment_script_impl.
     return _smoke_run_experiment_script_impl(
         profile_script="run_experiment_h100.sh",
         max_new_tokens=max_new_tokens,

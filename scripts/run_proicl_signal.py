@@ -131,6 +131,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--vllm-parity-artifact", type=Path, default=None)
     parser.add_argument("--run-kind", default="flow")
     parser.add_argument("--run-stage", default="small_real_slice")
+    parser.add_argument(
+        "--run-timestamp",
+        default=None,
+        help="Optional UTC timestamp for standardized run roots; use to resume a failed run.",
+    )
     parser.add_argument("--cost-cap-dollars", type=float, default=0.0)
     parser.add_argument("--estimated-dollar-cost-per-cell", type=float, default=0.0)
     parser.add_argument("--estimated-wall-clock-seconds-per-cell", type=float, default=7200)
@@ -745,6 +750,7 @@ def main() -> None:
             tracks=args.tracks,
             archive_scope=args.archive_scope,
             backend=args.backend,
+            timestamp=args.run_timestamp,
             tag=args.run_tag,
         )
         args.root = standard_run_root(args.root, identity)

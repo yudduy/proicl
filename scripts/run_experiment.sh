@@ -18,6 +18,7 @@ Useful overrides:
 Environment knobs:
   RUN_ROOT                 Output series directory. Default: runs/experiment
   RUN_TAG                  Short tag inside the standardized run id. Default: heldout
+  RUN_TIMESTAMP            Optional UTC run timestamp. Set to resume a failed run directory.
   TRACKS                   Eval tracks. Default: boxnet acre game_of_life_halting graph_color_n12
   ARCHIVE_TRAIN_TRACKS     GEPA training tracks. Default: five in-distribution Reasoning Gym tasks
   ARCHIVE_HELDOUT_TRACKS   Held-out tracks for cross-family provenance. Default: TRACKS
@@ -75,6 +76,7 @@ INCLUDE_CANDIDATES="${INCLUDE_CANDIDATES:-0}"
 
 RUN_ROOT="${RUN_ROOT:-runs/experiment}"
 RUN_TAG="${RUN_TAG:-heldout}"
+RUN_TIMESTAMP="${RUN_TIMESTAMP:-}"
 TRACKS="${TRACKS:-reasoning_gym_boxnet reasoning_gym_acre reasoning_gym_game_of_life_halting reasoning_gym_graph_color_n12}"
 ARCHIVE_TRAIN_TRACKS="${ARCHIVE_TRAIN_TRACKS:-reasoning_gym_family_relationships reasoning_gym_graph_color_n10 reasoning_gym_maze reasoning_gym_palindrome_generation reasoning_gym_letter_counting}"
 ARCHIVE_HELDOUT_TRACKS="${ARCHIVE_HELDOUT_TRACKS:-$TRACKS}"
@@ -497,6 +499,7 @@ payload = {
     ),
     "run_root": os.environ["PROICL_RUN_ROOT"],
     "run_tag": os.environ["PROICL_RUN_TAG"],
+    "run_timestamp": os.environ.get("PROICL_RUN_TIMESTAMP") or None,
     "reflection_provider": os.environ["PROICL_REFLECTION_PROVIDER"],
     "tracks": os.environ["PROICL_TRACKS"].split(),
     "conditions": os.environ["PROICL_CONDITIONS"].split(),
@@ -604,6 +607,7 @@ export PROICL_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="$CALIBRATION_VLLM_GPU_MEM
 export PROICL_ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL="$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
 export PROICL_RUN_ROOT="$RUN_ROOT"
 export PROICL_RUN_TAG="$RUN_TAG"
+export PROICL_RUN_TIMESTAMP="$RUN_TIMESTAMP"
 export PROICL_REFLECTION_PROVIDER="$REFLECTION_PROVIDER"
 export PROICL_TRACKS="$TRACKS"
 export PROICL_CONDITIONS="$CONDITIONS"
@@ -789,6 +793,9 @@ if [[ "$OVERLAP_GEPA_AND_CELLS" == "1" ]]; then
 fi
 if [[ -n "${VLLM_GPU_MEMORY_UTILIZATION:-}" ]]; then
   MAIN_CMD+=(--vllm-gpu-memory-utilization "$VLLM_GPU_MEMORY_UTILIZATION")
+fi
+if [[ -n "$RUN_TIMESTAMP" ]]; then
+  MAIN_CMD+=(--run-timestamp "$RUN_TIMESTAMP")
 fi
 if [[ -n "${VLLM_MAX_MODEL_LEN:-}" ]]; then
   MAIN_CMD+=(--vllm-max-model-len "$VLLM_MAX_MODEL_LEN")

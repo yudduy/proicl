@@ -12,6 +12,7 @@ from polaris.infra.serving.vllm import (
     VLLMForcedTokenProcessor,
     VLLMGenerator,
     VLLMSamplingRecorderProcessor,
+    VLLMValidTokenMaskProcessor,
 )
 
 
@@ -47,6 +48,16 @@ def test_vllm_sampling_recorder_samples_records_and_forces_logits():
     )
 
 
+def test_vllm_valid_token_mask_suppresses_model_head_padding_rows():
+    proc = VLLMValidTokenMaskProcessor(valid_vocab_size=4)
+    logits = torch.tensor([0.0, 1.0, 2.0, 3.0, 100.0, 200.0])
+
+    masked = proc([1], [], logits)
+
+    assert masked[:4].tolist() == pytest.approx([0.0, 1.0, 2.0, 3.0])
+    assert torch.isneginf(masked[4:]).all()
+
+
 def test_vllm_low_temp_batch_uses_one_generate_call_and_stable_offsets(monkeypatch):
     seen_batch_sizes = []
     seen_processor_seeds = []
@@ -69,17 +80,17 @@ def test_vllm_low_temp_batch_uses_one_generate_call_and_stable_offsets(monkeypat
                 seen_temperatures.append(params.temperature)
                 seen_ignore_eos.append(params.ignore_eos)
                 seen_min_tokens.append(getattr(params, "min_tokens", None))
+                seen_processor_seeds.append(params.seed)
                 token_ids = []
                 processors = getattr(params, "logits_processors", None) or []
                 if processors:
-                    processor = processors[0]
                     for _ in range(params.max_tokens):
                         logits = torch.full((16,), -100.0)
                         logits[row_idx + 1] = 100.0
-                        logits = processor(prompt["prompt_token_ids"], token_ids, logits)
+                        for processor in processors:
+                            logits = processor(prompt["prompt_token_ids"], token_ids, logits)
                         token_ids.append(int(torch.argmax(logits).item()))
                 else:
-                    seen_processor_seeds.append(params.seed)
                     token_ids = [row_idx + 1]
                 outputs.append(SimpleNamespace(outputs=[SimpleNamespace(token_ids=token_ids)]))
             return outputs
@@ -123,10 +134,70 @@ def test_vllm_low_temp_batch_uses_one_generate_call_and_stable_offsets(monkeypat
     assert seen_temperatures == [0.5, 0.5, 0.5]
     assert seen_ignore_eos == [False, False, False]
     assert seen_min_tokens == [None, None, None]
-    assert [out.token_ids for out in outs] == [[1], [2], [3]]
-    assert [out.generation for out in outs] == ["1", "2", "3"]
+    assert [out.token_ids for out in outs] == [[1, 1], [2, 2], [3, 3]]
+    assert [out.generation for out in outs] == ["1,1", "2,2", "3,3"]
     assert all(out.logprobs_norm == [] for out in outs)
     assert all(out.logprobs_unnorm == [] for out in outs)
+
+
+def test_vllm_generation_masks_tokenizer_out_of_range_ids(monkeypatch):
+    class FakeSamplingParams:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class FakeLLM:
+        def __init__(self, **kwargs):
+            pass
+
+        def generate(self, prompts, sampling_params, use_tqdm=False):
+            params_list = (
+                sampling_params
+                if isinstance(sampling_params, list)
+                else [sampling_params for _ in prompts]
+            )
+            outputs = []
+            for prompt, params in zip(prompts, params_list):
+                token_ids = []
+                logits = torch.tensor([0.0, 1.0, 2.0, 3.0, 999.0])
+                for processor in getattr(params, "logits_processors", []) or []:
+                    logits = processor(prompt["prompt_token_ids"], token_ids, logits)
+                token_ids.append(int(torch.argmax(logits).item()))
+                outputs.append(SimpleNamespace(outputs=[SimpleNamespace(token_ids=token_ids)]))
+            return outputs
+
+    class FakeTokenizer:
+        pad_token_id = 0
+        eos_token_id = 3
+
+        def __len__(self):
+            return 4
+
+        def encode(self, text):
+            return [1]
+
+        def decode(self, token_ids, skip_special_tokens=True):
+            return ",".join(str(x) for x in token_ids)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        types.SimpleNamespace(
+            AutoTokenizer=types.SimpleNamespace(
+                from_pretrained=lambda *args, **kwargs: FakeTokenizer()
+            )
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm",
+        types.SimpleNamespace(LLM=FakeLLM, SamplingParams=FakeSamplingParams),
+    )
+    gen = VLLMGenerator(model_id="fake-model", seed=17)
+
+    out = gen.generate_low_temp("a", temperature=0.5, max_new_tokens=1)
+
+    assert out.token_ids == [3]
+    assert out.generation == "3"
 
 
 def test_vllm_generate_power_batch_batches_drafts_and_proposals(monkeypatch):
@@ -147,11 +218,11 @@ def test_vllm_generate_power_batch_batches_drafts_and_proposals(monkeypatch):
             for row_idx, (prompt, params) in enumerate(zip(prompts, sampling_params)):
                 seen_temperatures.append(params.temperature)
                 token_ids = []
-                processor = params.logits_processors[0]
                 for _ in range(params.max_tokens):
                     logits = torch.full((16,), -100.0)
                     logits[row_idx + 1] = 100.0
-                    logits = processor(prompt["prompt_token_ids"], token_ids, logits)
+                    for processor in params.logits_processors:
+                        logits = processor(prompt["prompt_token_ids"], token_ids, logits)
                     token_ids.append(int(torch.argmax(logits).item()))
                 outputs.append(SimpleNamespace(outputs=[SimpleNamespace(token_ids=token_ids)]))
             return list(reversed(outputs))
@@ -217,11 +288,11 @@ def test_vllm_generate_sps_power_batch_batches_candidates_and_rollouts(monkeypat
             outputs = []
             for row_idx, (prompt, params) in enumerate(zip(prompts, sampling_params)):
                 token_ids = []
-                processor = params.logits_processors[0]
                 for _ in range(params.max_tokens):
                     logits = torch.full((16,), -100.0)
                     logits[(row_idx % 8) + 1] = 100.0
-                    logits = processor(prompt["prompt_token_ids"], token_ids, logits)
+                    for processor in params.logits_processors:
+                        logits = processor(prompt["prompt_token_ids"], token_ids, logits)
                     token_ids.append(int(torch.argmax(logits).item()))
                 outputs.append(SimpleNamespace(outputs=[SimpleNamespace(token_ids=token_ids)]))
             return outputs
@@ -288,11 +359,11 @@ def test_vllm_generate_sps_power_batch_respects_chain_microbatch(monkeypatch):
             outputs = []
             for row_idx, (prompt, params) in enumerate(zip(prompts, sampling_params)):
                 token_ids = []
-                processor = params.logits_processors[0]
                 for _ in range(params.max_tokens):
                     logits = torch.full((16,), -100.0)
                     logits[(row_idx % 8) + 1] = 100.0
-                    logits = processor(prompt["prompt_token_ids"], token_ids, logits)
+                    for processor in params.logits_processors:
+                        logits = processor(prompt["prompt_token_ids"], token_ids, logits)
                     token_ids.append(int(torch.argmax(logits).item()))
                 outputs.append(SimpleNamespace(outputs=[SimpleNamespace(token_ids=token_ids)]))
             return outputs

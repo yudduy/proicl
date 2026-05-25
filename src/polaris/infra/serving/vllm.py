@@ -168,6 +168,22 @@ class VLLMSamplingRecorderProcessor:
         return forced
 
 
+class VLLMValidTokenMaskProcessor:
+    """Suppress model-head padding rows that are not real tokenizer ids."""
+
+    def __init__(self, valid_vocab_size: int) -> None:
+        self.valid_vocab_size = int(valid_vocab_size)
+
+    def clone(self) -> "VLLMValidTokenMaskProcessor":
+        return self
+
+    def __call__(self, prompt_token_ids, past_token_ids, logits):
+        if self.valid_vocab_size > 0 and logits.shape[-1] > self.valid_vocab_size:
+            logits = logits.clone()
+            logits[..., self.valid_vocab_size :] = -float("inf")
+        return logits
+
+
 class VLLMGenerator:
     """vLLM V0 sampler with source-audited forced-token scoring."""
 
@@ -222,6 +238,10 @@ class VLLMGenerator:
         )
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+        try:
+            self.valid_vocab_size = int(len(self.tokenizer))
+        except TypeError:
+            self.valid_vocab_size = int(getattr(self.tokenizer, "vocab_size", 0) or 0)
 
         kwargs: dict[str, Any] = {
             "model": model_id,
@@ -272,6 +292,7 @@ class VLLMGenerator:
                 "pad_token_id": self.tokenizer.pad_token_id,
                 "eos_token_id": self.tokenizer.eos_token_id,
             },
+            "valid_vocab_size": self.valid_vocab_size,
         }
 
     def _encode(self, text: str) -> list[int]:
@@ -283,6 +304,24 @@ class VLLMGenerator:
     def _sampling_params(self, **kwargs):
         return self.SamplingParams(**kwargs)
 
+    def _with_valid_token_mask(self, processors: list[Any] | None = None) -> list[Any]:
+        return [VLLMValidTokenMaskProcessor(self.valid_vocab_size), *(processors or [])]
+
+    def _validate_token_ids(self, token_ids: list[int], *, context: str) -> None:
+        if self.valid_vocab_size <= 0:
+            return
+        invalid = [
+            int(x)
+            for x in token_ids
+            if int(x) < 0 or int(x) >= self.valid_vocab_size
+        ]
+        if invalid:
+            sample = invalid[:8]
+            raise ValueError(
+                f"{context} contains token ids outside tokenizer vocabulary: "
+                f"valid_vocab_size={self.valid_vocab_size} invalid_sample={sample}"
+            )
+
     def _generate_ids(
         self,
         prefix_ids: list[int],
@@ -292,6 +331,7 @@ class VLLMGenerator:
         do_sample: bool,
         exact_length: bool = False,
     ) -> list[int]:
+        self._validate_token_ids(prefix_ids, context="generation prefix_ids")
         params_kwargs: dict[str, Any] = {
             "max_tokens": max_new_tokens,
             "top_p": 1.0,
@@ -303,8 +343,10 @@ class VLLMGenerator:
             params_kwargs["min_tokens"] = max_new_tokens
         if do_sample:
             params_kwargs["temperature"] = temperature
+            params_kwargs["logits_processors"] = self._with_valid_token_mask()
         else:
             params_kwargs["temperature"] = 0.0
+            params_kwargs["logits_processors"] = self._with_valid_token_mask()
         params = self._sampling_params(**params_kwargs)
         outputs = self.llm.generate(
             prompts=[{"prompt_token_ids": list(prefix_ids)}],
@@ -348,6 +390,10 @@ class VLLMGenerator:
         for row_idx, (prefix_ids, length, offset) in enumerate(
             zip(prefix_ids_batch, lengths, offsets)
         ):
+            self._validate_token_ids(
+                list(prefix_ids),
+                context=f"generation prefix_ids_batch[{row_idx}]",
+            )
             if length < 0:
                 raise ValueError(f"max_new_tokens must be >= 0, got {length}")
             if length == 0:
@@ -362,6 +408,7 @@ class VLLMGenerator:
                 ignore_eos=exact_length,
                 skip_special_tokens=False,
                 detokenize=False,
+                logits_processors=self._with_valid_token_mask(),
             )
             if exact_length:
                 params.min_tokens = length
@@ -440,6 +487,10 @@ class VLLMGenerator:
         for row_idx, (prefix_ids, length, offset) in enumerate(
             zip(prefix_ids_batch, lengths, offsets)
         ):
+            self._validate_token_ids(
+                list(prefix_ids),
+                context=f"fused generation prefix_ids_batch[{row_idx}]",
+            )
             if length < 0:
                 raise ValueError(f"max_new_tokens must be >= 0, got {length}")
             if length == 0:
@@ -457,7 +508,7 @@ class VLLMGenerator:
                 ignore_eos=exact_length,
                 skip_special_tokens=False,
                 detokenize=False,
-                logits_processors=[processor],
+                logits_processors=self._with_valid_token_mask([processor]),
             )
             if exact_length:
                 params.min_tokens = length
@@ -1243,6 +1294,8 @@ class VLLMGenerator:
                 lp_norm_tokens.append([])
                 lp_unnorm_tokens.append([])
                 continue
+            self._validate_token_ids(list(prefix_ids), context="score prefix_ids")
+            self._validate_token_ids(list(target_ids), context="score target_ids")
 
             processor = VLLMForcedTokenProcessor(list(target_ids), temperature)
             params = self._sampling_params(
