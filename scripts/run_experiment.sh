@@ -118,7 +118,7 @@ normalize_gpu_csv() {
   local raw="$1"
   raw="$(printf '%s' "$raw" | tr ' \t\n;' ',')"
   raw="$(printf '%s' "$raw" | sed -E 's/(^|,)gpu:/\1/g; s/,+/,/g; s/^,//; s/,$//')"
-  if [[ "$raw" == "NoDevFiles" || "$raw" == "none" || "$raw" == "N/A" ]]; then
+  if [[ "$raw" == "NoDevFiles" || "$raw" == "none" || "$raw" == "N/A" || "$raw" == "void" ]]; then
     raw=""
   fi
   printf '%s\n' "$raw"
@@ -156,6 +156,73 @@ detect_nvidia_smi_gpus() {
   echo ""
 }
 
+map_gpu_csv_to_numeric_indices() {
+  local raw="$1"
+  raw="$(normalize_gpu_csv "$raw")"
+  if [[ -z "$raw" ]]; then
+    echo ""
+    return
+  fi
+  if [[ "$raw" == "all" ]]; then
+    detect_nvidia_smi_gpus
+    return
+  fi
+  if [[ "$raw" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+    echo "$raw"
+    return
+  fi
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    echo "$raw"
+    return
+  fi
+  local mapping
+  mapping="$(nvidia-smi --query-gpu=index,uuid --format=csv,noheader,nounits 2>/dev/null || true)"
+  if [[ -z "$mapping" ]]; then
+    echo "$raw"
+    return
+  fi
+  local out=()
+  local unresolved=0
+  IFS=',' read -r -a requested <<<"$raw"
+  for item in "${requested[@]}"; do
+    item="$(printf '%s' "$item" | xargs)"
+    if [[ -z "$item" ]]; then
+      continue
+    fi
+    if [[ "$item" =~ ^[0-9]+$ ]]; then
+      out+=("$item")
+      continue
+    fi
+    local match
+    match="$(
+      awk -F',' -v target="$item" '
+        {
+          idx=$1; uuid=$2
+          gsub(/^ +| +$/, "", idx)
+          gsub(/^ +| +$/, "", uuid)
+          if (uuid == target) { print idx; exit }
+        }
+      ' <<<"$mapping"
+    )"
+    if [[ -n "$match" ]]; then
+      out+=("$match")
+    else
+      unresolved=1
+    fi
+  done
+  if [[ "$unresolved" == "0" && "${#out[@]}" -gt 0 ]]; then
+    (IFS=','; echo "${out[*]}")
+    return
+  fi
+  local visible_count
+  visible_count="$(detect_nvidia_smi_gpus)"
+  if [[ -n "$visible_count" ]]; then
+    echo "$visible_count"
+  else
+    echo "$raw"
+  fi
+}
+
 detect_assigned_gpus() {
   local source="default"
   local raw=""
@@ -185,6 +252,7 @@ detect_assigned_gpus() {
     raw="$(detect_nvidia_smi_gpus)"
   fi
   raw="$(normalize_gpu_csv "$raw")"
+  raw="$(map_gpu_csv_to_numeric_indices "$raw")"
   if [[ -z "$raw" ]]; then
     source="fallback"
     raw="0"

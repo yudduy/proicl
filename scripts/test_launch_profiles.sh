@@ -115,4 +115,41 @@ assert_contains "$out" "gpu_profile=l40 gpu_count=3"
 assert_contains "$out" "gpu_detection_source=nvidia-smi"
 assert_contains "$out" "max_parallel_cells=2 smoke_max_parallel_cells=1"
 
+cat >"$tmpbin/nvidia-smi" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *"--query-gpu=index,uuid --format=csv,noheader,nounits"*)
+    printf "0, GPU-aaaa\n"
+    ;;
+  *"--query-gpu=index --format=csv,noheader,nounits"*)
+    printf "0\n"
+    ;;
+  *"--query-gpu=name --format=csv,noheader"*)
+    printf "NVIDIA L40S\n"
+    ;;
+  *"--query-gpu=index,memory.total --format=csv,noheader,nounits"*)
+    printf "0, 49140\n"
+    ;;
+  *"--query-gpu=index,name,memory.total --format=csv,noheader"*)
+    printf "0, NVIDIA L40S, 49140 MiB\n"
+    ;;
+  -L)
+    printf "GPU 0: NVIDIA L40S\n"
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+SH
+chmod +x "$tmpbin/nvidia-smi"
+out="$(run_case nvidia-visible-devices-uuid \
+  DRY_RUN=1 \
+  SKIP_INSTALL=1 \
+  HOST_MEMORY_MIB=200000 \
+  NVIDIA_VISIBLE_DEVICES=GPU-aaaa \
+  PATH="$tmpbin:$PATH" \
+  bash "$ROOT/scripts/run_experiment_l40.sh")"
+assert_contains "$out" "gpu_profile=l40 gpu_count=1 cuda_visible_devices=0"
+assert_contains "$out" "gpu_detection_source=NVIDIA_VISIBLE_DEVICES"
+
 echo "launch profile tests passed"
