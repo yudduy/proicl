@@ -100,7 +100,7 @@ def _ensure_model_cached(model_id: str, revision: str | None = None) -> str:
     return snapshot_download(model_id, revision=revision)
 
 
-def _run_python_json(script: str) -> dict:
+def _run_python_json(script: str, *, timeout: int = 1200) -> dict:
     import json
     import os
     import subprocess
@@ -112,7 +112,7 @@ def _run_python_json(script: str) -> dict:
         env=env,
         capture_output=True,
         text=True,
-        timeout=1200,
+        timeout=timeout,
     )
     marker = "PROICL_JSON:"
     for line in reversed(proc.stdout.splitlines()):
@@ -1430,6 +1430,8 @@ def _smoke_run_experiment_script_impl(
     profile_script: str,
     max_new_tokens: int = 64,
     vllm_max_model_len: int = 2048,
+    smoke_only: bool = True,
+    extra_env: dict[str, str] | None = None,
     estimated_dollar_cost: float | None = None,
     cost_cap_dollars: float | None = None,
     user_authorized_paid_run: bool = False,
@@ -1457,13 +1459,14 @@ env = os.environ.copy()
 env.update({{
     "PYTHONPATH": "/proicl/src",
     "RUN_ROOT": "/tmp/proicl-run-experiment-smoke",
-    "SMOKE_ONLY": "1",
+    "SMOKE_ONLY": {("1" if smoke_only else "0")!r},
     "SKIP_INSTALL": "1",
     "SKIP_SPS_MATH500_CALIBRATION": "1",
     "MAX_NEW_TOKENS": str({int(max_new_tokens)}),
     "VLLM_MAX_MODEL_LEN": str({int(vllm_max_model_len)}),
     "REFLECTION_PROVIDER": "local-hf",
 }})
+env.update({extra_env or {}!r})
 proc = subprocess.run(
     ["bash", "/proicl/scripts/{profile_script}"],
     cwd="/proicl",
@@ -1475,6 +1478,8 @@ proc = subprocess.run(
 run_root = Path("/tmp/proicl-run-experiment-smoke")
 launch_config = run_root / "launch_config.json"
 resource_probe = run_root / "resource_probe.json"
+backend_preflight = run_root / "backend_preflight" / "backend_preflight.json"
+runtime_profile = run_root / "runtime_profile.json"
 payload = {{
     "passed": proc.returncode == 0,
     "returncode": proc.returncode,
@@ -1482,6 +1487,8 @@ payload = {{
     "stderr_tail": proc.stderr[-4000:],
     "launch_config": json.loads(launch_config.read_text()) if launch_config.exists() else None,
     "resource_probe": json.loads(resource_probe.read_text()) if resource_probe.exists() else None,
+    "backend_preflight": json.loads(backend_preflight.read_text()) if backend_preflight.exists() else None,
+    "runtime_profile": json.loads(runtime_profile.read_text()) if runtime_profile.exists() else None,
 }}
 if proc.returncode == 0:
     bundles = sorted(run_root.rglob("results_bundle.tar.gz"))
@@ -1490,7 +1497,8 @@ if proc.returncode == 0:
 print("PROICL_JSON:" + json.dumps(payload, sort_keys=True))
 if proc.returncode != 0:
     raise SystemExit(proc.returncode)
-"""
+""",
+        timeout=3900,
     )
     print(f"smoke_run_experiment_script: {summary}")
     return summary
@@ -1514,6 +1522,86 @@ def smoke_run_experiment_script_l40(
         profile_script="run_experiment_l40.sh",
         max_new_tokens=max_new_tokens,
         vllm_max_model_len=vllm_max_model_len,
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+    )
+
+
+@app.function(
+    gpu="L40S",
+    timeout=7200,
+    volumes={"/cache/huggingface": hf_cache},
+)
+def smoke_backend_matrix_l40s(
+    estimated_dollar_cost: float | None = None,
+    cost_cap_dollars: float | None = None,
+    user_authorized_paid_run: bool = False,
+) -> dict:
+    """Run production-shaped SPS/vLLM backend preflight on one Modal L40S."""
+    # _require_modal_preflight is enforced inside _smoke_run_experiment_script_impl.
+    return _smoke_run_experiment_script_impl(
+        profile_script="run_experiment_l40.sh",
+        max_new_tokens=1024,
+        vllm_max_model_len=4096,
+        smoke_only=True,
+        extra_env={
+            "TRACKS": "reasoning_gym_boxnet",
+            "EVAL_START": "20",
+            "EVAL_END": "21",
+            "GEPA_DEV_END": "1",
+            "ROLLOUT_BUDGET": "1",
+            "ARCHIVE_SIZE": "2",
+            "MAX_METRIC_CALLS": "4",
+            "SPS_TOP_K": "8",
+            "SPS_CANDIDATE_POOL_SIZE": "8",
+            "SPS_ROLLOUTS_PER_CANDIDATE": "8",
+            "SPS_ROLLOUT_HORIZON": "128",
+            "SPS_VLLM_BATCH_SIZE": "32",
+        },
+        estimated_dollar_cost=estimated_dollar_cost,
+        cost_cap_dollars=cost_cap_dollars,
+        user_authorized_paid_run=user_authorized_paid_run,
+    )
+
+
+@app.function(
+    gpu="L40S:2",
+    timeout=7200,
+    volumes={"/cache/huggingface": hf_cache},
+)
+def smoke_run_experiment_script_l40s_2gpu(
+    max_new_tokens: int = 64,
+    vllm_max_model_len: int = 4096,
+    estimated_dollar_cost: float | None = None,
+    cost_cap_dollars: float | None = None,
+    user_authorized_paid_run: bool = False,
+) -> dict:
+    """Run a release-shaped two-GPU L40S smoke that must produce a bundle."""
+    # _require_modal_preflight is enforced inside _smoke_run_experiment_script_impl.
+    return _smoke_run_experiment_script_impl(
+        profile_script="run_experiment_l40.sh",
+        max_new_tokens=max_new_tokens,
+        vllm_max_model_len=vllm_max_model_len,
+        smoke_only=False,
+        extra_env={
+            "TRACKS": "reasoning_gym_boxnet",
+            "ARCHIVE_TRAIN_TRACKS": "reasoning_gym_family_relationships",
+            "ARCHIVE_HELDOUT_TRACKS": "reasoning_gym_boxnet",
+            "CONDITIONS": "base_greedy sps_only gepa_sps_fixed prorl_v2_greedy",
+            "EVAL_START": "20",
+            "EVAL_END": "22",
+            "GEPA_DEV_START": "0",
+            "GEPA_DEV_END": "1",
+            "ROLLOUT_BUDGET": "1",
+            "ARCHIVE_SIZE": "2",
+            "MAX_METRIC_CALLS": "4",
+            "SPS_TOP_K": "2",
+            "SPS_CANDIDATE_POOL_SIZE": "2",
+            "SPS_ROLLOUTS_PER_CANDIDATE": "1",
+            "SPS_ROLLOUT_HORIZON": "16",
+            "SPS_VLLM_BATCH_SIZE": "32",
+        },
         estimated_dollar_cost=estimated_dollar_cost,
         cost_cap_dollars=cost_cap_dollars,
         user_authorized_paid_run=user_authorized_paid_run,

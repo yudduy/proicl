@@ -88,6 +88,22 @@ def _env_positive_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+def _env_batch_limit(*names: str) -> int:
+    for name in names:
+        value = _env_positive_int(name, 0)
+        if value > 0:
+            return value
+    return 0
+
+
+def _chunks(seq: list[Any], size: int):
+    if size <= 0 or len(seq) <= size:
+        yield seq
+        return
+    for start in range(0, len(seq), size):
+        yield seq[start : start + size]
+
+
 class VLLMForcedTokenProcessor:
     """Record target-token logprobs, then force that token for decode."""
 
@@ -286,6 +302,11 @@ class VLLMGenerator:
             "max_model_len": self.max_model_len,
             "prefix_caching": self.enable_prefix_caching,
             "reset_prefix_cache_for_scoring": self.reset_prefix_cache_for_scoring,
+            "sps_vllm_batch_size": _env_batch_limit(
+                "PROICL_SPS_VLLM_BATCH_SIZE",
+                "SPS_VLLM_BATCH_SIZE",
+            )
+            or None,
             "native_segment_available": hasattr(self.llm, "score_sequences"),
             "parity_artifact_path": self.parity_artifact_path,
             "tokenizer_special_tokens": {
@@ -419,11 +440,20 @@ class VLLMGenerator:
         if not scheduled:
             return results
 
-        outputs = self.llm.generate(
-            prompts=prompts,
-            sampling_params=params_list,
-            use_tqdm=False,
+        batch_limit = _env_batch_limit(
+            "PROICL_SPS_VLLM_BATCH_SIZE",
+            "SPS_VLLM_BATCH_SIZE",
         )
+        outputs = []
+        indices = list(range(len(prompts)))
+        for chunk in _chunks(indices, batch_limit):
+            outputs.extend(
+                self.llm.generate(
+                    prompts=[prompts[idx] for idx in chunk],
+                    sampling_params=[params_list[idx] for idx in chunk],
+                    use_tqdm=False,
+                )
+            )
         for output, (row_idx, expected_len) in zip(outputs, scheduled):
             token_ids = [int(x) for x in output.outputs[0].token_ids]
             if exact_length and len(token_ids) != expected_len:
@@ -519,11 +549,20 @@ class VLLMGenerator:
         if not scheduled:
             return results
 
-        outputs = self.llm.generate(
-            prompts=prompts,
-            sampling_params=params_list,
-            use_tqdm=False,
+        batch_limit = _env_batch_limit(
+            "PROICL_SPS_VLLM_BATCH_SIZE",
+            "SPS_VLLM_BATCH_SIZE",
         )
+        outputs = []
+        indices = list(range(len(prompts)))
+        for chunk in _chunks(indices, batch_limit):
+            outputs.extend(
+                self.llm.generate(
+                    prompts=[prompts[idx] for idx in chunk],
+                    sampling_params=[params_list[idx] for idx in chunk],
+                    use_tqdm=False,
+                )
+            )
         unmatched = set(range(len(scheduled)))
         for output_idx, output in enumerate(outputs):
             token_ids = [int(x) for x in output.outputs[0].token_ids]
@@ -1329,13 +1368,22 @@ class VLLMGenerator:
                 lp_unnorm_tokens=lp_unnorm_tokens,
             )
 
+        batch_limit = _env_batch_limit(
+            "PROICL_SPS_VLLM_BATCH_SIZE",
+            "SPS_VLLM_BATCH_SIZE",
+        )
         self._reset_prefix_cache_for_scoring()
         try:
-            outputs = self.llm.generate(
-                prompts=prompts,
-                sampling_params=params_list,
-                use_tqdm=False,
-            )
+            outputs = []
+            indices = list(range(len(prompts)))
+            for chunk in _chunks(indices, batch_limit):
+                outputs.extend(
+                    self.llm.generate(
+                        prompts=[prompts[idx] for idx in chunk],
+                        sampling_params=[params_list[idx] for idx in chunk],
+                        use_tqdm=False,
+                    )
+                )
         finally:
             self._reset_prefix_cache_for_scoring()
         for output, (row_idx, expected, processor) in zip(outputs, scored):
@@ -1426,15 +1474,28 @@ class VLLMGenerator:
                 lp_unnorm_tokens=lp_unnorm_tokens,
             )
 
-        try:
-            outputs = score_sequences(
-                prompt_token_ids=prompts,
-                target_token_ids=targets,
-                temperatures=[float(temperature)] * len(targets),
-            )
-        except TypeError:
-            outputs = score_sequences(prompts, targets, [float(temperature)] * len(targets))
-        outputs = list(outputs)
+        batch_limit = _env_batch_limit(
+            "PROICL_SPS_VLLM_BATCH_SIZE",
+            "SPS_VLLM_BATCH_SIZE",
+        )
+        outputs = []
+        indices = list(range(len(prompts)))
+        for chunk in _chunks(indices, batch_limit):
+            chunk_prompts = [prompts[idx] for idx in chunk]
+            chunk_targets = [targets[idx] for idx in chunk]
+            try:
+                chunk_outputs = score_sequences(
+                    prompt_token_ids=chunk_prompts,
+                    target_token_ids=chunk_targets,
+                    temperatures=[float(temperature)] * len(chunk_targets),
+                )
+            except TypeError:
+                chunk_outputs = score_sequences(
+                    chunk_prompts,
+                    chunk_targets,
+                    [float(temperature)] * len(chunk_targets),
+                )
+            outputs.extend(list(chunk_outputs))
         if len(outputs) != len(scored):
             raise RuntimeError(
                 "vLLM native score_sequences returned the wrong number of rows: "

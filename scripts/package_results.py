@@ -179,6 +179,8 @@ def _copy_top_level(full_root: Path, run_root: Path, bundle_root: Path) -> None:
     for rel in [
         "launch_config.json",
         "resource_probe.json",
+        "runtime_profile.json",
+        "backend_preflight/backend_preflight.json",
         "wandb.json",
         "run_index.json",
         "events.jsonl",

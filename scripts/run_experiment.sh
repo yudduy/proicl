@@ -45,6 +45,12 @@ Environment knobs:
   PROFILE_MAX_PARALLEL_CELLS Profile-level cap for concurrent cell workers.
   HOST_MEMORY_PER_CELL_MIB Host RAM budget per concurrent vLLM cell worker.
   HOST_MEMORY_RESERVE_MIB  Host RAM reserve before assigning cell workers.
+  VLLM_DTYPE               vLLM dtype. Default: bfloat16 for GPU profiles.
+  VLLM_ATTENTION_BACKEND   Optional vLLM attention backend. L40/A100/H100 default: FLASH_ATTN.
+  VLLM_PREFIX_CACHING      1/0. Default: 1.
+  SPS_VLLM_BATCH_SIZE      Internal vLLM request microbatch for SPS.
+  CALIBRATION_DTYPE        vLLM/HF parity calibration dtype. Default: float32.
+  SKIP_BACKEND_PREFLIGHT=1 Skip production-shaped SPS/vLLM preflight. Not recommended.
   VLLM_PARITY_ARTIFACT     Existing calibration_summary.json. If unset, calibration is run.
   SKIP_INSTALL=1           Reuse the current environment.
   INSTALL_PROFILE          standard or full. Default: standard.
@@ -71,6 +77,7 @@ SKIP_INSTALL="${SKIP_INSTALL:-0}"
 INSTALL_PROFILE="${INSTALL_PROFILE:-standard}"
 SKIP_CALIBRATION="${SKIP_CALIBRATION:-0}"
 SKIP_SPS_MATH500_CALIBRATION="${SKIP_SPS_MATH500_CALIBRATION:-1}"
+SKIP_BACKEND_PREFLIGHT="${SKIP_BACKEND_PREFLIGHT:-0}"
 SMOKE_ONLY="${SMOKE_ONLY:-0}"
 INCLUDE_CANDIDATES="${INCLUDE_CANDIDATES:-0}"
 
@@ -427,6 +434,14 @@ GPU_NAMES_DETECTED="$(detect_gpu_names)"
 GPU_MIN_MEMORY_MIB="$(detect_min_gpu_memory_mib)"
 HOST_MEMORY_MIB_DETECTED="$(detect_host_memory_mib)"
 NUM_SHARDS="${NUM_SHARDS:-$GPU_COUNT}"
+if [[ "$EVAL_START" -lt 0 || "$EVAL_END" -le "$EVAL_START" ]]; then
+  echo "Eval split must satisfy 0 <= EVAL_START < EVAL_END; got $EVAL_START/$EVAL_END" >&2
+  exit 1
+fi
+EVAL_PROBLEM_COUNT=$((EVAL_END - EVAL_START))
+if [[ "$NUM_SHARDS" -gt "$EVAL_PROBLEM_COUNT" ]]; then
+  NUM_SHARDS="$EVAL_PROBLEM_COUNT"
+fi
 GPU_PROFILE="${GPU_PROFILE:-auto}"
 if [[ "$GPU_PROFILE" == "auto" ]]; then
   GPU_PROFILE="$(detect_gpu_profile)"
@@ -437,6 +452,10 @@ case "$GPU_PROFILE" in
     DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.45"
     DEFAULT_WALL_CLOCK_SECONDS_PER_CELL="10800"
     DEFAULT_SPS_CHAIN_BATCH_SIZE="1"
+    DEFAULT_SPS_VLLM_BATCH_SIZE="32"
+    DEFAULT_VLLM_DTYPE="bfloat16"
+    DEFAULT_VLLM_ATTENTION_BACKEND="FLASH_ATTN"
+    DEFAULT_VLLM_PREFIX_CACHING="1"
     DEFAULT_PROFILE_MAX_PARALLEL_CELLS="2"
     DEFAULT_HOST_MEMORY_RESERVE_MIB="32768"
     DEFAULT_HOST_MEMORY_PER_CELL_MIB="49152"
@@ -446,6 +465,10 @@ case "$GPU_PROFILE" in
     DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.60"
     DEFAULT_WALL_CLOCK_SECONDS_PER_CELL="3600"
     DEFAULT_SPS_CHAIN_BATCH_SIZE="2"
+    DEFAULT_SPS_VLLM_BATCH_SIZE="64"
+    DEFAULT_VLLM_DTYPE="bfloat16"
+    DEFAULT_VLLM_ATTENTION_BACKEND="FLASH_ATTN"
+    DEFAULT_VLLM_PREFIX_CACHING="1"
     DEFAULT_PROFILE_MAX_PARALLEL_CELLS="6"
     DEFAULT_HOST_MEMORY_RESERVE_MIB="32768"
     DEFAULT_HOST_MEMORY_PER_CELL_MIB="40960"
@@ -455,6 +478,10 @@ case "$GPU_PROFILE" in
     DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.55"
     DEFAULT_WALL_CLOCK_SECONDS_PER_CELL="7200"
     DEFAULT_SPS_CHAIN_BATCH_SIZE="2"
+    DEFAULT_SPS_VLLM_BATCH_SIZE="32"
+    DEFAULT_VLLM_DTYPE="bfloat16"
+    DEFAULT_VLLM_ATTENTION_BACKEND="FLASH_ATTN"
+    DEFAULT_VLLM_PREFIX_CACHING="1"
     DEFAULT_PROFILE_MAX_PARALLEL_CELLS="4"
     DEFAULT_HOST_MEMORY_RESERVE_MIB="32768"
     DEFAULT_HOST_MEMORY_PER_CELL_MIB="40960"
@@ -464,6 +491,10 @@ case "$GPU_PROFILE" in
     DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.50"
     DEFAULT_WALL_CLOCK_SECONDS_PER_CELL="7200"
     DEFAULT_SPS_CHAIN_BATCH_SIZE="1"
+    DEFAULT_SPS_VLLM_BATCH_SIZE="16"
+    DEFAULT_VLLM_DTYPE="bfloat16"
+    DEFAULT_VLLM_ATTENTION_BACKEND=""
+    DEFAULT_VLLM_PREFIX_CACHING="1"
     DEFAULT_PROFILE_MAX_PARALLEL_CELLS="1"
     DEFAULT_HOST_MEMORY_RESERVE_MIB="32768"
     DEFAULT_HOST_MEMORY_PER_CELL_MIB="49152"
@@ -478,16 +509,24 @@ if [[ "$GPU_MIN_MEMORY_MIB" -gt 0 && "$GPU_MIN_MEMORY_MIB" -lt 60000 ]]; then
   DEFAULT_VLLM_GPU_MEMORY_UTILIZATION="0.80"
   DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.50"
   DEFAULT_SPS_CHAIN_BATCH_SIZE="1"
+  DEFAULT_SPS_VLLM_BATCH_SIZE="${DEFAULT_SPS_VLLM_BATCH_SIZE:-16}"
+  DEFAULT_VLLM_DTYPE="bfloat16"
 fi
 
 ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL="${ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL:-$DEFAULT_WALL_CLOCK_SECONDS_PER_CELL}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-$DEFAULT_VLLM_GPU_MEMORY_UTILIZATION}"
 CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="${CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION:-$DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION}"
 SPS_CHAIN_BATCH_SIZE="${SPS_CHAIN_BATCH_SIZE:-$DEFAULT_SPS_CHAIN_BATCH_SIZE}"
+SPS_VLLM_BATCH_SIZE="${SPS_VLLM_BATCH_SIZE:-$DEFAULT_SPS_VLLM_BATCH_SIZE}"
+VLLM_DTYPE="${VLLM_DTYPE:-$DEFAULT_VLLM_DTYPE}"
+VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-$DEFAULT_VLLM_ATTENTION_BACKEND}"
+VLLM_PREFIX_CACHING="${VLLM_PREFIX_CACHING:-$DEFAULT_VLLM_PREFIX_CACHING}"
+CALIBRATION_DTYPE="${CALIBRATION_DTYPE:-float32}"
 if [[ "$GPU_MIN_MEMORY_MIB" -gt 0 && "$GPU_MIN_MEMORY_MIB" -lt 60000 && "${ALLOW_LOW_VRAM_HIGH_UTIL:-0}" != "1" ]]; then
   VLLM_GPU_MEMORY_UTILIZATION="0.80"
   CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.50"
   SPS_CHAIN_BATCH_SIZE="1"
+  VLLM_DTYPE="${VLLM_DTYPE:-bfloat16}"
 fi
 PROFILE_MAX_PARALLEL_CELLS="${PROFILE_MAX_PARALLEL_CELLS:-$DEFAULT_PROFILE_MAX_PARALLEL_CELLS}"
 HOST_MEMORY_RESERVE_MIB="${HOST_MEMORY_RESERVE_MIB:-$DEFAULT_HOST_MEMORY_RESERVE_MIB}"
@@ -528,6 +567,18 @@ export PYTHONDONTWRITEBYTECODE=1
 export TOKENIZERS_PARALLELISM=false
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export VLLM_USE_V1="${VLLM_USE_V1:-0}"
+export PROICL_SPS_CHAIN_BATCH_SIZE="$SPS_CHAIN_BATCH_SIZE"
+export PROICL_SPS_VLLM_BATCH_SIZE="$SPS_VLLM_BATCH_SIZE"
+export SPS_VLLM_BATCH_SIZE="$SPS_VLLM_BATCH_SIZE"
+if [[ "$VLLM_PREFIX_CACHING" != "0" && "$VLLM_PREFIX_CACHING" != "1" ]]; then
+  echo "VLLM_PREFIX_CACHING must be 0 or 1; got $VLLM_PREFIX_CACHING" >&2
+  exit 1
+fi
+if [[ -n "$VLLM_ATTENTION_BACKEND" ]]; then
+  export VLLM_ATTENTION_BACKEND
+else
+  unset VLLM_ATTENTION_BACKEND
+fi
 
 if [[ "$DRY_RUN" != "1" ]]; then
   mkdir -p "$RUN_ROOT" "$CACHE_ROOT" "$HF_HOME" "$PIP_CACHE_DIR"
@@ -559,6 +610,10 @@ payload = {
     "host_memory_per_cell_mib": int(os.environ["PROICL_HOST_MEMORY_PER_CELL_MIB"]),
     "parallelism_strategy": os.environ["PROICL_PARALLELISM_STRATEGY"],
     "vllm_gpu_memory_utilization": float(os.environ["PROICL_VLLM_GPU_MEMORY_UTILIZATION"]),
+    "vllm_dtype": os.environ["PROICL_VLLM_DTYPE"],
+    "vllm_attention_backend": os.environ.get("PROICL_VLLM_ATTENTION_BACKEND") or None,
+    "vllm_prefix_caching": os.environ["PROICL_VLLM_PREFIX_CACHING"] == "1",
+    "calibration_dtype": os.environ["PROICL_CALIBRATION_DTYPE"],
     "calibration_vllm_gpu_memory_utilization": float(
         os.environ["PROICL_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION"]
     ),
@@ -588,6 +643,7 @@ payload = {
         "rollouts_per_candidate": int(os.environ["PROICL_SPS_ROLLOUTS_PER_CANDIDATE"]),
         "rollout_horizon": int(os.environ["PROICL_SPS_ROLLOUT_HORIZON"]),
         "chain_batch_size": int(os.environ["PROICL_SPS_CHAIN_BATCH_SIZE"]),
+        "vllm_batch_size": int(os.environ["PROICL_SPS_VLLM_BATCH_SIZE"]),
     },
 }
 with open(out, "w", encoding="utf-8") as f:
@@ -632,6 +688,11 @@ payload = {
     "profile_max_parallel_cells": int(os.environ.get("PROICL_PROFILE_MAX_PARALLEL_CELLS", "0")),
     "host_memory_reserve_mib": int(os.environ.get("PROICL_HOST_MEMORY_RESERVE_MIB", "0")),
     "host_memory_per_cell_mib": int(os.environ.get("PROICL_HOST_MEMORY_PER_CELL_MIB", "0")),
+    "vllm_dtype": os.environ.get("PROICL_VLLM_DTYPE"),
+    "vllm_attention_backend": os.environ.get("PROICL_VLLM_ATTENTION_BACKEND"),
+    "vllm_prefix_caching": os.environ.get("PROICL_VLLM_PREFIX_CACHING") == "1",
+    "calibration_dtype": os.environ.get("PROICL_CALIBRATION_DTYPE"),
+    "sps_vllm_batch_size": int(os.environ.get("PROICL_SPS_VLLM_BATCH_SIZE", "0")),
     "slurm": {key: os.environ.get(key) for key in slurm_keys if os.environ.get(key) is not None},
 }
 with open(out, "w", encoding="utf-8") as f:
@@ -652,6 +713,9 @@ print_launch_summary() {
   echo "  profile_max_parallel_cells=$PROFILE_MAX_PARALLEL_CELLS host_memory_reserve_mib=$HOST_MEMORY_RESERVE_MIB host_memory_per_cell_mib=$HOST_MEMORY_PER_CELL_MIB"
   echo "  vllm_gpu_memory_utilization=$VLLM_GPU_MEMORY_UTILIZATION calibration=$CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION"
   echo "  sps_chain_batch_size=$SPS_CHAIN_BATCH_SIZE"
+  echo "  sps_vllm_batch_size=$SPS_VLLM_BATCH_SIZE"
+  echo "  vllm_dtype=$VLLM_DTYPE vllm_attention_backend=${VLLM_ATTENTION_BACKEND:-auto} vllm_prefix_caching=$VLLM_PREFIX_CACHING"
+  echo "  calibration_dtype=$CALIBRATION_DTYPE"
   echo "  reflection_provider=$REFLECTION_PROVIDER"
   echo "  estimated_wall_clock_seconds_per_cell=$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
 }
@@ -671,6 +735,10 @@ export PROICL_HOST_MEMORY_RESERVE_MIB="$HOST_MEMORY_RESERVE_MIB"
 export PROICL_HOST_MEMORY_PER_CELL_MIB="$HOST_MEMORY_PER_CELL_MIB"
 export PROICL_PARALLELISM_STRATEGY="$PARALLELISM_STRATEGY"
 export PROICL_VLLM_GPU_MEMORY_UTILIZATION="$VLLM_GPU_MEMORY_UTILIZATION"
+export PROICL_VLLM_DTYPE="$VLLM_DTYPE"
+export PROICL_VLLM_ATTENTION_BACKEND="$VLLM_ATTENTION_BACKEND"
+export PROICL_VLLM_PREFIX_CACHING="$VLLM_PREFIX_CACHING"
+export PROICL_CALIBRATION_DTYPE="$CALIBRATION_DTYPE"
 export PROICL_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="$CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION"
 export PROICL_ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL="$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
 export PROICL_RUN_ROOT="$RUN_ROOT"
@@ -691,6 +759,7 @@ export PROICL_SPS_CANDIDATE_POOL_SIZE="$SPS_CANDIDATE_POOL_SIZE"
 export PROICL_SPS_ROLLOUTS_PER_CANDIDATE="$SPS_ROLLOUTS_PER_CANDIDATE"
 export PROICL_SPS_ROLLOUT_HORIZON="$SPS_ROLLOUT_HORIZON"
 export PROICL_SPS_CHAIN_BATCH_SIZE="$SPS_CHAIN_BATCH_SIZE"
+export PROICL_SPS_VLLM_BATCH_SIZE="$SPS_VLLM_BATCH_SIZE"
 
 print_launch_summary
 if [[ "$DRY_RUN" != "1" ]]; then
@@ -766,25 +835,74 @@ if [[ "$DRY_RUN" != "1" ]]; then
   fi
 fi
 
-CALIB_DIR="$RUN_ROOT/calibration/deepseek_r1_distill_qwen_1p5b_vllm"
+CALIB_DTYPE_ID="$(printf '%s' "$CALIBRATION_DTYPE" | tr -c '[:alnum:]_' '_')"
+CALIB_DIR="$RUN_ROOT/calibration/deepseek_r1_distill_qwen_1p5b_vllm_${CALIB_DTYPE_ID}"
 CALIB_ARTIFACT="${VLLM_PARITY_ARTIFACT:-$CALIB_DIR/calibration_summary.json}"
 if [[ "$SKIP_CALIBRATION" == "1" && -z "${VLLM_PARITY_ARTIFACT:-}" ]]; then
   echo "SKIP_CALIBRATION=1 requires VLLM_PARITY_ARTIFACT=/path/to/calibration_summary.json" >&2
   exit 1
 fi
 
-if [[ -z "${VLLM_PARITY_ARTIFACT:-}" && ! -f "$CALIB_ARTIFACT" ]]; then
+calibration_artifact_passes() {
+  local artifact="$1"
+  [[ -f "$artifact" ]] || return 1
+  "$PY" - "$artifact" <<'PY'
+import sys
+from pathlib import Path
+
+from polaris.infra.vllm_calibration import (
+    CalibrationArtifactError,
+    validate_vllm_calibration_artifact,
+)
+
+try:
+    validate_vllm_calibration_artifact(Path(sys.argv[1]))
+except CalibrationArtifactError as exc:
+    print(exc, file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+if [[ "$DRY_RUN" != "1" && -z "${VLLM_PARITY_ARTIFACT:-}" && -f "$CALIB_ARTIFACT" ]]; then
+  if ! calibration_artifact_passes "$CALIB_ARTIFACT" >/dev/null 2>&1; then
+    echo "Existing vLLM calibration artifact failed validation; rebuilding $CALIB_DIR" >&2
+    rm -rf "$CALIB_DIR"
+  fi
+fi
+
+if [[ -z "${VLLM_PARITY_ARTIFACT:-}" && ( "$DRY_RUN" == "1" || ! -f "$CALIB_ARTIFACT" ) ]]; then
   section "Running vLLM/HF calibration"
-  run_cmd "$PY" scripts/vllm_hf_calibration.py \
+  CALIB_CMD=("$PY" scripts/vllm_hf_calibration.py \
     --model-key deepseek-r1-distill-qwen-1.5b \
     --out "$CALIB_DIR" \
     --temperature 0.25 \
     --segment-lens 1 2 8 32 128 \
-    --hf-dtype float32 \
-    --vllm-dtype float32 \
+    --hf-dtype "$CALIBRATION_DTYPE" \
+    --vllm-dtype "$CALIBRATION_DTYPE" \
     --vllm-model-impl transformers \
     --vllm-gpu-memory-utilization "$CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION" \
-    --vllm-max-model-len "${VLLM_MAX_MODEL_LEN:-4096}"
+    --vllm-max-model-len "${VLLM_MAX_MODEL_LEN:-4096}")
+  if [[ "$VLLM_PREFIX_CACHING" == "0" ]]; then
+    CALIB_CMD+=(--no-vllm-prefix-caching)
+  fi
+  CALIB_ENV=(env)
+  if [[ "$CALIBRATION_DTYPE" == "float32" ]]; then
+    CALIB_ENV+=(-u VLLM_ATTENTION_BACKEND)
+  fi
+  _calibration_visible_default="${CUDA_VISIBLE_DEVICES:-}"
+  _calibration_visible_default="${_calibration_visible_default%%,*}"
+  CALIBRATION_CUDA_VISIBLE_DEVICES="${CALIBRATION_CUDA_VISIBLE_DEVICES:-$_calibration_visible_default}"
+  if [[ -n "${CALIBRATION_CUDA_VISIBLE_DEVICES:-}" ]]; then
+    CALIB_ENV+=("CUDA_VISIBLE_DEVICES=$CALIBRATION_CUDA_VISIBLE_DEVICES")
+  fi
+  run_cmd "${CALIB_ENV[@]}" "${CALIB_CMD[@]}"
+fi
+
+if [[ "$DRY_RUN" != "1" ]]; then
+  if ! calibration_artifact_passes "$CALIB_ARTIFACT"; then
+    echo "vLLM calibration artifact did not pass: $CALIB_ARTIFACT" >&2
+    exit 1
+  fi
 fi
 
 SPS_CALIB_DIR="$RUN_ROOT/calibration/sps_vs_mcmc_math500"
@@ -805,6 +923,84 @@ if [[ "$SKIP_SPS_MATH500_CALIBRATION" != "1" && "$SMOKE_ONLY" != "1" ]]; then
     --tolerance "$SPS_CALIBRATION_TOLERANCE"
   run_cmd "$PY" scripts/check_sps_calibration.py "$SPS_CALIB_DIR" \
     --tolerance "$SPS_CALIBRATION_TOLERANCE"
+fi
+
+BACKEND_PREFLIGHT_DIR="$RUN_ROOT/backend_preflight"
+RUNTIME_PROFILE_PATH="$RUN_ROOT/runtime_profile.json"
+if [[ "$DRY_RUN" != "1" && "$SKIP_BACKEND_PREFLIGHT" != "1" ]]; then
+  section "Running production-shaped SPS/vLLM backend preflight"
+  BACKEND_PREFLIGHT_CMD=(
+    "$PY" scripts/backend_preflight.py
+    --out-dir "$BACKEND_PREFLIGHT_DIR"
+    --runtime-profile "$RUNTIME_PROFILE_PATH"
+    --track reasoning_gym_boxnet
+    --split "$EVAL_START" "$EVAL_END"
+    --model-key deepseek-r1-distill-qwen-1.5b
+    --vllm-parity-artifact "$CALIB_ARTIFACT"
+    --vllm-dtype "$VLLM_DTYPE"
+    --vllm-model-impl transformers
+    --vllm-gpu-memory-utilization "$VLLM_GPU_MEMORY_UTILIZATION"
+    --vllm-max-model-len "${VLLM_MAX_MODEL_LEN:-4096}"
+    --vllm-prefix-caching "$VLLM_PREFIX_CACHING"
+    --sps-vllm-batch-size "$SPS_VLLM_BATCH_SIZE"
+    --max-new-tokens "$MAX_NEW_TOKENS"
+    --sps-block-num "$SPS_BLOCK_NUM"
+    --sps-top-k "$SPS_TOP_K"
+    --sps-candidate-pool-size "$SPS_CANDIDATE_POOL_SIZE"
+    --sps-rollouts-per-candidate "$SPS_ROLLOUTS_PER_CANDIDATE"
+    --sps-rollout-horizon "$SPS_ROLLOUT_HORIZON"
+    --gpu "${CUDA_VISIBLE_DEVICES%%,*}"
+    --gpu-profile "$GPU_PROFILE"
+    --gpu-names "$GPU_NAMES_DETECTED"
+    --gpu-min-memory-mib "$GPU_MIN_MEMORY_MIB"
+    --run-kind "$RUN_KIND"
+    --estimated-wall-clock-seconds "$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
+    --allow-fallbacks
+  )
+  if [[ -n "$VLLM_ATTENTION_BACKEND" ]]; then
+    BACKEND_PREFLIGHT_CMD+=(--vllm-attention-backend "$VLLM_ATTENTION_BACKEND")
+  fi
+  if [[ "${LOCAL_FILES_ONLY:-0}" == "1" ]]; then
+    BACKEND_PREFLIGHT_CMD+=(--local-files-only)
+  fi
+  run_cmd "${BACKEND_PREFLIGHT_CMD[@]}"
+  if [[ -f "$RUNTIME_PROFILE_PATH" ]]; then
+    eval "$("$PY" - "$RUNTIME_PROFILE_PATH" <<'PY'
+import json
+import shlex
+import sys
+
+path = sys.argv[1]
+profile = json.loads(open(path, encoding="utf-8").read())
+values = {
+    "VLLM_DTYPE": profile["vllm_dtype"],
+    "VLLM_PREFIX_CACHING": "1" if profile["vllm_prefix_caching"] else "0",
+    "PROICL_VLLM_DTYPE": profile["vllm_dtype"],
+    "PROICL_VLLM_PREFIX_CACHING": "1" if profile["vllm_prefix_caching"] else "0",
+    "PROICL_SPS_VLLM_BATCH_SIZE": str(profile["sps_vllm_batch_size"]),
+    "SPS_VLLM_BATCH_SIZE": str(profile["sps_vllm_batch_size"]),
+}
+backend = profile.get("vllm_attention_backend")
+if backend:
+    values["VLLM_ATTENTION_BACKEND"] = str(backend)
+    values["PROICL_VLLM_ATTENTION_BACKEND"] = str(backend)
+else:
+    print("unset VLLM_ATTENTION_BACKEND")
+    values["PROICL_VLLM_ATTENTION_BACKEND"] = ""
+for key, value in values.items():
+    print(f"export {key}={shlex.quote(str(value))}")
+PY
+)"
+    VLLM_DTYPE="$PROICL_VLLM_DTYPE"
+    VLLM_PREFIX_CACHING="$PROICL_VLLM_PREFIX_CACHING"
+    VLLM_ATTENTION_BACKEND="$PROICL_VLLM_ATTENTION_BACKEND"
+    SPS_VLLM_BATCH_SIZE="$PROICL_SPS_VLLM_BATCH_SIZE"
+    export PROICL_SPS_VLLM_BATCH_SIZE="$SPS_VLLM_BATCH_SIZE"
+    write_launch_config "$RUN_ROOT/launch_config.json"
+    write_resource_probe "$RUN_ROOT/resource_probe.json"
+  fi
+elif [[ "$DRY_RUN" != "1" ]]; then
+  echo "WARNING: SKIP_BACKEND_PREFLIGHT=1; full eval may fail later if vLLM/SPS runtime is unsafe." >&2
 fi
 
 read -r -a TRACK_ARGS <<<"$TRACKS"
@@ -845,6 +1041,7 @@ MAIN_CMD=(
   --estimated-wall-clock-seconds-per-cell "$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
   --reflection-provider "$REFLECTION_PROVIDER"
   --reflection-model-id "$REFLECTION_MODEL_ID"
+  --vllm-dtype "$VLLM_DTYPE"
 )
 
 if [[ "$SMOKE_ONLY" == "1" ]]; then
@@ -861,6 +1058,9 @@ if [[ "$OVERLAP_GEPA_AND_CELLS" == "1" ]]; then
 fi
 if [[ -n "${VLLM_GPU_MEMORY_UTILIZATION:-}" ]]; then
   MAIN_CMD+=(--vllm-gpu-memory-utilization "$VLLM_GPU_MEMORY_UTILIZATION")
+fi
+if [[ "$VLLM_PREFIX_CACHING" == "0" ]]; then
+  MAIN_CMD+=(--no-vllm-prefix-caching)
 fi
 if [[ -n "$RUN_TIMESTAMP" ]]; then
   MAIN_CMD+=(--run-timestamp "$RUN_TIMESTAMP")

@@ -38,6 +38,10 @@ assert_contains "$out" "gpu_profile=l40 gpu_count=1"
 assert_contains "$out" "gpu_detection_source=SLURM_STEP_GPUS"
 assert_contains "$out" "num_shards=1"
 assert_contains "$out" "max_parallel_cells=1 smoke_max_parallel_cells=1"
+assert_contains "$out" "vllm_dtype=bfloat16"
+assert_contains "$out" "vllm_attention_backend=FLASH_ATTN"
+assert_contains "$out" "calibration_dtype=float32"
+assert_contains "$out" "sps_vllm_batch_size=32"
 
 out="$(run_case l40-five-tight-host \
   "${common_env[@]}" \
@@ -69,6 +73,7 @@ assert_contains "$out" "gpu_profile=h100 gpu_count=4"
 assert_contains "$out" "num_shards=4"
 assert_contains "$out" "max_parallel_cells=4 smoke_max_parallel_cells=1"
 assert_contains "$out" "sps_chain_batch_size=2"
+assert_contains "$out" "sps_vllm_batch_size=64"
 
 out="$(run_case override-gpus \
   "${common_env[@]}" \

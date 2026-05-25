@@ -195,3 +195,31 @@ def test_modal_gpu_entrypoints_require_preflight():
             if is_modal_function and has_gpu:
                 body = ast.get_source_segment(source, node) or ""
                 assert "_require_modal_preflight" in body, f"{rel}:{node.name}"
+
+
+def test_backend_preflight_classifies_vllm_runtime_failures():
+    import importlib.util
+
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location(
+        "backend_preflight",
+        root / "scripts" / "backend_preflight.py",
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["backend_preflight"] = module
+    spec.loader.exec_module(module)
+
+    assert (
+        module._classify_failure(
+            1,
+            "triton.runtime.errors.OutOfResources: out of resource: shared memory, "
+            "Required: 131072, Hardware limit: 65536",
+        )
+        == "vllm_attention_shared_memory"
+    )
+    assert (
+        module._classify_failure(1, "ValueError: Token id 151703 is out of vocabulary")
+        == "invalid_token_id"
+    )
+    assert module._classify_failure(-9, "Detected 3 oom_kill events") == "host_oom_or_sigkill"
