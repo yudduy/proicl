@@ -28,8 +28,8 @@ Environment knobs:
   ROLLOUT_BUDGET           Samples per non-greedy condition. Default: 8
   NUM_SHARDS               Per-condition shards. Default: detected GPU count, at least 1
   MAX_PARALLEL_CELLS       Concurrent vLLM cell workers. Default: host-memory-aware.
-  SMOKE_MAX_PARALLEL_CELLS Concurrent smoke workers. Default: 1.
-  OVERLAP_GEPA_AND_CELLS=1 Overlap GEPA archive build with direct eval cells. Default: off.
+  SMOKE_MAX_PARALLEL_CELLS Developer smoke workers when SMOKE_ONLY=1.
+  OVERLAP_GEPA_AND_CELLS=0/1 Override GEPA/direct-cell overlap. Default: auto.
   GPUS                     Optional comma-separated GPU ids; overrides auto-detection.
   GPU_MEMORY_MIB           Optional comma-separated GPU memory override for dry runs/tests.
   HOST_MEMORY_MIB          Optional host memory override for dry runs/tests.
@@ -50,7 +50,8 @@ Environment knobs:
   VLLM_PREFIX_CACHING      1/0. Default: 1.
   SPS_VLLM_BATCH_SIZE      Internal vLLM request microbatch for SPS.
   CALIBRATION_DTYPE        vLLM/HF parity calibration dtype. Default: float32.
-  SKIP_BACKEND_PREFLIGHT=1 Skip production-shaped SPS/vLLM preflight. Not recommended.
+  RUN_BACKEND_PREFLIGHT=1 Opt into production-shaped SPS/vLLM preflight.
+  PREFLIGHT_ONLY=1        Run only the optional backend preflight, then exit.
   VLLM_PARITY_ARTIFACT     Existing calibration_summary.json. If unset, calibration is run.
   SKIP_INSTALL=1           Reuse the current environment.
   INSTALL_PROFILE          standard or full. Default: standard.
@@ -58,7 +59,7 @@ Environment knobs:
   WANDB_PROJECT            W&B project when WANDB_API_KEY is set. Default: proicl.
   SKIP_CALIBRATION=1       Require VLLM_PARITY_ARTIFACT instead of running calibration.
   SKIP_SPS_MATH500_CALIBRATION=0 Run the slow SPS-vs-MCMC MATH500 gate. Default: skipped.
-  SMOKE_ONLY=1             Run only the harness smoke.
+  SMOKE_ONLY=1             Developer-only: run only the harness smoke.
   INCLUDE_CANDIDATES=1     Include candidates.jsonl in the final bundle.
   PROICL_DISABLE_TQDM=1    Use plain progress lines instead of tqdm.
 EOF
@@ -77,8 +78,12 @@ SKIP_INSTALL="${SKIP_INSTALL:-0}"
 INSTALL_PROFILE="${INSTALL_PROFILE:-standard}"
 SKIP_CALIBRATION="${SKIP_CALIBRATION:-0}"
 SKIP_SPS_MATH500_CALIBRATION="${SKIP_SPS_MATH500_CALIBRATION:-1}"
-SKIP_BACKEND_PREFLIGHT="${SKIP_BACKEND_PREFLIGHT:-0}"
+SKIP_BACKEND_PREFLIGHT="${SKIP_BACKEND_PREFLIGHT:-1}"
+if [[ "${RUN_BACKEND_PREFLIGHT:-0}" == "1" ]]; then
+  SKIP_BACKEND_PREFLIGHT=0
+fi
 SMOKE_ONLY="${SMOKE_ONLY:-0}"
+PREFLIGHT_ONLY="${PREFLIGHT_ONLY:-0}"
 INCLUDE_CANDIDATES="${INCLUDE_CANDIDATES:-0}"
 
 RUN_ROOT="${RUN_ROOT:-runs/experiment}"
@@ -545,8 +550,17 @@ fi
 if [[ "$SMOKE_MAX_PARALLEL_CELLS" -gt "$MAX_PARALLEL_CELLS" ]]; then
   SMOKE_MAX_PARALLEL_CELLS="$MAX_PARALLEL_CELLS"
 fi
-OVERLAP_GEPA_AND_CELLS="${OVERLAP_GEPA_AND_CELLS:-0}"
-PARALLELISM_STRATEGY="host-memory-aware cell workers; smoke is sequential by default; GEPA/direct-cell overlap is opt-in"
+if [[ -z "${OVERLAP_GEPA_AND_CELLS:-}" ]]; then
+  if [[ "$GPU_COUNT" -gt 1 && "$MAX_PARALLEL_CELLS" -gt 1 ]]; then
+    OVERLAP_GEPA_AND_CELLS=1
+  else
+    OVERLAP_GEPA_AND_CELLS=0
+  fi
+fi
+if [[ "$GPU_COUNT" -le 1 ]]; then
+  OVERLAP_GEPA_AND_CELLS=0
+fi
+PARALLELISM_STRATEGY="full experiment only; host-memory-aware cell workers; GEPA/direct-cell overlap enabled on multi-GPU"
 MIN_GPU_MEMORY_MIB="${MIN_GPU_MEMORY_MIB:-24000}"
 if [[ "$GPU_MIN_MEMORY_MIB" -gt 0 && "$GPU_MIN_MEMORY_MIB" -lt "$MIN_GPU_MEMORY_MIB" ]]; then
   echo "Detected minimum GPU memory ${GPU_MIN_MEMORY_MIB}MiB, below required ${MIN_GPU_MEMORY_MIB}MiB." >&2
@@ -999,8 +1013,14 @@ PY
     write_launch_config "$RUN_ROOT/launch_config.json"
     write_resource_probe "$RUN_ROOT/resource_probe.json"
   fi
-elif [[ "$DRY_RUN" != "1" ]]; then
-  echo "WARNING: SKIP_BACKEND_PREFLIGHT=1; full eval may fail later if vLLM/SPS runtime is unsafe." >&2
+fi
+
+if [[ "$PREFLIGHT_ONLY" == "1" ]]; then
+  if [[ "$SKIP_BACKEND_PREFLIGHT" == "1" ]]; then
+    echo "PREFLIGHT_ONLY=1 requires RUN_BACKEND_PREFLIGHT=1." >&2
+    exit 1
+  fi
+  exit 0
 fi
 
 read -r -a TRACK_ARGS <<<"$TRACKS"
@@ -1046,6 +1066,8 @@ MAIN_CMD=(
 
 if [[ "$SMOKE_ONLY" == "1" ]]; then
   MAIN_CMD+=(--smoke-only)
+else
+  MAIN_CMD+=(--skip-smoke)
 fi
 if [[ "${SKIP_PREFETCH:-0}" == "1" ]]; then
   MAIN_CMD+=(--skip-prefetch)

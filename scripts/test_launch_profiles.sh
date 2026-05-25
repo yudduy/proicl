@@ -15,8 +15,17 @@ run_case() {
 assert_contains() {
   local output="$1"
   local needle="$2"
-  if ! grep -Fq "$needle" <<<"$output"; then
+  if ! grep -Fq -- "$needle" <<<"$output"; then
     echo "Expected output to contain: $needle" >&2
+    exit 1
+  fi
+}
+
+assert_not_contains() {
+  local output="$1"
+  local needle="$2"
+  if grep -Fq -- "$needle" <<<"$output"; then
+    echo "Expected output not to contain: $needle" >&2
     exit 1
   fi
 }
@@ -42,6 +51,9 @@ assert_contains "$out" "vllm_dtype=bfloat16"
 assert_contains "$out" "vllm_attention_backend=FLASH_ATTN"
 assert_contains "$out" "calibration_dtype=float32"
 assert_contains "$out" "sps_vllm_batch_size=32"
+assert_contains "$out" "--skip-smoke"
+assert_not_contains "$out" "--smoke-only"
+assert_not_contains "$out" "Running production-shaped SPS/vLLM backend preflight"
 
 out="$(run_case l40-five-tight-host \
   "${common_env[@]}" \
@@ -60,6 +72,7 @@ out="$(run_case l40-two-roomy-host \
 assert_contains "$out" "gpu_profile=l40 gpu_count=2"
 assert_contains "$out" "gpu_detection_source=SLURM_GPUS_ON_NODE"
 assert_contains "$out" "max_parallel_cells=2 smoke_max_parallel_cells=1"
+assert_contains "$out" "overlap_gepa_and_cells=1"
 
 out="$(run_case h100-four \
   DRY_RUN=1 \
@@ -72,6 +85,7 @@ out="$(run_case h100-four \
 assert_contains "$out" "gpu_profile=h100 gpu_count=4"
 assert_contains "$out" "num_shards=4"
 assert_contains "$out" "max_parallel_cells=4 smoke_max_parallel_cells=1"
+assert_contains "$out" "overlap_gepa_and_cells=1"
 assert_contains "$out" "sps_chain_batch_size=2"
 assert_contains "$out" "sps_vllm_batch_size=64"
 
