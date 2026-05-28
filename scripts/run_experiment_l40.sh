@@ -1,17 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# L40/L40S and other 48GB-class GPUs. This is intentionally conservative:
-# GPU count is auto-detected, but concurrent vLLM workers are capped by host RAM.
-export GPU_PROFILE="${GPU_PROFILE:-l40}"
-export REFLECTION_PROVIDER="${REFLECTION_PROVIDER:-local-hf}"
-export SPS_CHAIN_BATCH_SIZE="${SPS_CHAIN_BATCH_SIZE:-1}"
-export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.78}"
-export CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="${CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION:-0.45}"
-export PROFILE_MAX_PARALLEL_CELLS="${PROFILE_MAX_PARALLEL_CELLS:-2}"
-export HOST_MEMORY_RESERVE_MIB="${HOST_MEMORY_RESERVE_MIB:-32768}"
-export HOST_MEMORY_PER_CELL_MIB="${HOST_MEMORY_PER_CELL_MIB:-49152}"
-export SMOKE_MAX_PARALLEL_CELLS="${SMOKE_MAX_PARALLEL_CELLS:-1}"
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec bash "$SCRIPT_DIR/run_experiment.sh" "$@"
+exec bash "$SCRIPT_DIR/run_experiment.sh" l40 "$@"

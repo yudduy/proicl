@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as _dt
 import os
 import platform
 import json
@@ -28,7 +29,7 @@ from polaris.core.persistent_memory import PersistentMemoryLedger
 from polaris.core.repair import RepairConfig, run_verifier_guided_repair
 from polaris.evals.datasets.math500 import MATH500_TEST_SLICE, Problem
 from polaris.evals.verifiers.math import VERIFIER_ID, score_math
-from polaris.io.artifacts import append_jsonl, write_json
+from polaris.io.artifacts import append_jsonl, write_json, write_jsonl
 from polaris.io.manifest import write_run_manifest
 from polaris.io.rollouts import RolloutLedger
 from polaris.io.trajectory_cache import TrajectoryCache, TrajectoryKey, TrajectoryRecord
@@ -441,6 +442,151 @@ def _copy_memory_sqlite(src: Path, dst: Path) -> None:
     shutil.copyfile(src, dst)
 
 
+def _read_jsonl_rows(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    had_invalid_line = False
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    had_invalid_line = True
+    if had_invalid_line:
+        write_jsonl(path, rows)
+    return rows
+
+
+def _problem_id_from_row(row: dict[str, Any]) -> str | None:
+    value = row.get("problem_id")
+    return str(value) if value is not None else None
+
+
+def _normalize_selected_rows(
+    path: Path,
+    *,
+    expected_problem_ids: set[str],
+) -> list[dict[str, Any]]:
+    rows = _read_jsonl_rows(path)
+    kept: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    changed = False
+    for row in rows:
+        problem_id = _problem_id_from_row(row)
+        if problem_id is None or problem_id not in expected_problem_ids:
+            changed = True
+            continue
+        if problem_id in seen:
+            changed = True
+            continue
+        seen.add(problem_id)
+        kept.append(row)
+    if changed:
+        write_jsonl(path, kept)
+    elif not path.exists():
+        path.touch()
+    return kept
+
+
+def _filter_jsonl_to_completed_problems(
+    path: Path,
+    *,
+    completed_problem_ids: set[str],
+    keep_problemless_rows: bool = False,
+) -> list[dict[str, Any]]:
+    rows = _read_jsonl_rows(path)
+    kept: list[dict[str, Any]] = []
+    changed = False
+    for row in rows:
+        problem_id = _problem_id_from_row(row)
+        if problem_id is None:
+            if keep_problemless_rows:
+                kept.append(row)
+            else:
+                changed = True
+            continue
+        if problem_id in completed_problem_ids:
+            kept.append(row)
+        else:
+            changed = True
+    if changed:
+        write_jsonl(path, kept)
+    elif not path.exists():
+        path.touch()
+    return kept
+
+
+def _selected_score(row: dict[str, Any]) -> float:
+    if "selected_score" in row:
+        return float(row.get("selected_score") or 0.0)
+    verifier = row.get("verifier_result")
+    if isinstance(verifier, dict):
+        return float(verifier.get("score", 0.0) or 0.0)
+    return 0.0
+
+
+def _selected_passed(row: dict[str, Any]) -> bool:
+    if "selected_passed" in row:
+        return bool(row.get("selected_passed"))
+    verifier = row.get("verifier_result")
+    return bool(verifier.get("passed", False)) if isinstance(verifier, dict) else False
+
+
+def _checkpoint_payload(
+    *,
+    track: str,
+    condition: str,
+    run_stage: str,
+    expected_problem_ids: Sequence[str],
+    completed_problem_ids: set[str],
+    n_candidates: int,
+) -> dict[str, Any]:
+    ordered_completed = [
+        problem_id
+        for problem_id in expected_problem_ids
+        if problem_id in completed_problem_ids
+    ]
+    return {
+        "schema_version": 1,
+        "track": track,
+        "condition": condition,
+        "run_stage": run_stage,
+        "updated_at": _dt.datetime.now(_dt.timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "complete": len(ordered_completed) == len(expected_problem_ids),
+        "completed_problem_ids": ordered_completed,
+        "completed_problems": len(ordered_completed),
+        "expected_problems": len(expected_problem_ids),
+        "n_candidates": n_candidates,
+    }
+
+
+def _write_checkpoint(
+    path: Path,
+    *,
+    track: str,
+    condition: str,
+    run_stage: str,
+    expected_problem_ids: Sequence[str],
+    completed_problem_ids: set[str],
+    n_candidates: int,
+) -> None:
+    write_json(
+        path,
+        _checkpoint_payload(
+            track=track,
+            condition=condition,
+            run_stage=run_stage,
+            expected_problem_ids=expected_problem_ids,
+            completed_problem_ids=completed_problem_ids,
+            n_candidates=n_candidates,
+        ),
+    )
+
+
 def _eligible_memory_ids(store: MemoryStore | None, prompt_id: str) -> list[str]:
     if store is None:
         return []
@@ -689,28 +835,60 @@ def run_condition(
     schedule = _select_schedule(condition)
     B = int(budget_override or _budget_for(condition))
 
+    candidates_path = out_dir / "candidates.jsonl"
+    scores_path = out_dir / "scores.jsonl"
+    selected_path = out_dir / "selected.jsonl"
+    expected_problem_ids = [str(problem.problem_id) for problem in problems]
+    selected_rows = _normalize_selected_rows(
+        selected_path,
+        expected_problem_ids=set(expected_problem_ids),
+    )
+    completed_problem_ids = {
+        str(row["problem_id"])
+        for row in selected_rows
+        if row.get("problem_id") is not None
+    }
+    candidate_rows = _filter_jsonl_to_completed_problems(
+        candidates_path,
+        completed_problem_ids=completed_problem_ids,
+    )
+    _filter_jsonl_to_completed_problems(
+        scores_path,
+        completed_problem_ids=completed_problem_ids,
+    )
+
     ledger_path = memory_store_path or (out_dir / "memory.sqlite")
     memory_ledger: PersistentMemoryLedger | None = None
     if memory_is_enabled:
         memory_ledger = PersistentMemoryLedger(ledger_path)
+        memory_ledger.rollback_incomplete_queries(
+            completed_problem_ids,
+            expected_query_ids=expected_problem_ids,
+        )
         if memory_store is None:
             memory_store = _memory_store_from_ledger(memory_ledger)
 
-    candidates_path = out_dir / "candidates.jsonl"
-    scores_path = out_dir / "scores.jsonl"
-    selected_path = out_dir / "selected.jsonl"
-    candidates_path.touch(exist_ok=True)
-    scores_path.touch(exist_ok=True)
-    selected_path.touch(exist_ok=True)
-
-    n_correct = 0
-    total_selected_score = 0.0
-    total_wall = 0.0
-    total_dollars = 0.0
-    total_input_tokens = 0
-    total_output_tokens = 0
-    n_candidates = 0
+    n_correct = sum(1 for row in selected_rows if _selected_passed(row))
+    total_selected_score = sum(_selected_score(row) for row in selected_rows)
+    total_wall = sum(
+        float(row.get("wall_clock_seconds", 0.0) or 0.0)
+        for row in candidate_rows
+    )
+    total_dollars = sum(
+        float(row.get("estimated_dollar_cost", row.get("dollar_estimate", 0.0)) or 0.0)
+        for row in candidate_rows
+    )
+    total_input_tokens = sum(
+        int(row.get("prompt_token_count", 0) or 0)
+        for row in candidate_rows
+    )
+    total_output_tokens = sum(
+        int(row.get("generation_token_count", 0) or 0) for row in candidate_rows
+    )
+    n_candidates = len(candidate_rows)
     ledger = RolloutLedger()
+    if n_candidates:
+        ledger.charge_inference(condition, n_candidates)
     repair_enabled = enable_repair or condition in {
         "proicl_gepa_mcmc_repair",
         "proicl_gepa_mcmc_fork_repair",
@@ -723,12 +901,43 @@ def run_condition(
     }
     repair_traces_path = out_dir / "repair_traces.jsonl"
     fork_traces_path = out_dir / "fork_traces.jsonl"
+    checkpoint_path = out_dir / "checkpoint.json"
+    _write_checkpoint(
+        checkpoint_path,
+        track=track,
+        condition=condition,
+        run_stage=run_stage,
+        expected_problem_ids=expected_problem_ids,
+        completed_problem_ids=completed_problem_ids,
+        n_candidates=n_candidates,
+    )
     if repair_enabled:
-        append_jsonl(repair_traces_path, {"event": "repair_enabled", "condition": condition})
+        repair_rows = _filter_jsonl_to_completed_problems(
+            repair_traces_path,
+            completed_problem_ids=completed_problem_ids,
+            keep_problemless_rows=True,
+        )
+        if not any(row.get("event") == "repair_enabled" for row in repair_rows):
+            append_jsonl(
+                repair_traces_path,
+                {"event": "repair_enabled", "condition": condition},
+            )
     if fork_enabled:
-        append_jsonl(fork_traces_path, {"event": "fork_search_enabled", "condition": condition})
+        fork_rows = _filter_jsonl_to_completed_problems(
+            fork_traces_path,
+            completed_problem_ids=completed_problem_ids,
+            keep_problemless_rows=True,
+        )
+        if not any(row.get("event") == "fork_search_enabled" for row in fork_rows):
+            append_jsonl(
+                fork_traces_path,
+                {"event": "fork_search_enabled", "condition": condition},
+            )
 
     for problem in problems:
+        problem_id = str(problem.problem_id)
+        if problem_id in completed_problem_ids:
+            continue
         if condition == "greedy":
             best = _greedy_candidate(
                 sampler, archive_subset, problem, max_new_tokens, scorer
@@ -811,6 +1020,7 @@ def run_condition(
                                     if c.verifier_result.get("passed", False)
                                     else 0
                                 ),
+                                query_id=problem.problem_id,
                             )
                         if c.admitted_memory_id:
                             for entry in memory_store.entries:
@@ -952,6 +1162,16 @@ def run_condition(
         selected_row["selected_score"] = selected_score
         selected_row["selected_passed"] = best.verifier_result.get("passed", False)
         append_jsonl(selected_path, selected_row)
+        completed_problem_ids.add(problem_id)
+        _write_checkpoint(
+            checkpoint_path,
+            track=track,
+            condition=condition,
+            run_stage=run_stage,
+            expected_problem_ids=expected_problem_ids,
+            completed_problem_ids=completed_problem_ids,
+            n_candidates=n_candidates,
+        )
 
     accuracy = n_correct / len(problems) if problems else 0.0
     mean_selected_score = total_selected_score / len(problems) if problems else 0.0

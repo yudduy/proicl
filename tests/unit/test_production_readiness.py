@@ -205,7 +205,31 @@ def test_persistent_memory_ledger_replays_and_prunes(tmp_path):
             retrieved_ids=["m1"],
             verifier_metadata={"verifier_id": "math"},
         )
-        ledger.update_posterior(["m1"], verifier_outcome=1)
+        ledger.update_posterior(["m1"], verifier_outcome=1, query_id="q")
+        assert (
+            ledger.rollback_incomplete_queries(
+                {"p1", "p2"},
+                expected_query_ids={"q"},
+            )
+            == 2
+        )
+        first_reloaded = next(entry for entry in ledger.entries() if entry.id == "m1")
+        assert first_reloaded.reliability_alpha == 1.0
+        assert first_reloaded.reliability_beta == 1.0
+        ledger.record_retrieval(
+            query_id="q",
+            eligible_ids=["m1", "m2"],
+            retrieved_ids=["m1"],
+            verifier_metadata={"verifier_id": "math"},
+        )
+        ledger.update_posterior(["m1"], verifier_outcome=1, query_id="q")
+        assert (
+            ledger.rollback_incomplete_queries(
+                {"p1", "p2", "q"},
+                expected_query_ids={"q"},
+            )
+            == 0
+        )
         pruned = ledger.prune(max_entries_per_prompt=1)
         assert pruned == ["m2"]
         assert [entry.id for entry in ledger.entries()] == ["m1"]

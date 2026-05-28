@@ -42,7 +42,7 @@ out="$(run_case l40-one \
   "${common_env[@]}" \
   HOST_MEMORY_MIB=65536 \
   SLURM_STEP_GPUS=0 \
-  bash "$ROOT/scripts/run_experiment_l40.sh")"
+  bash "$ROOT/scripts/run_experiment.sh" l40)"
 assert_contains "$out" "gpu_profile=l40 gpu_count=1"
 assert_contains "$out" "gpu_detection_source=SLURM_STEP_GPUS"
 assert_contains "$out" "num_shards=1"
@@ -59,7 +59,7 @@ out="$(run_case l40-five-tight-host \
   "${common_env[@]}" \
   HOST_MEMORY_MIB=65536 \
   SLURM_STEP_GPUS=0,1,2,3,4 \
-  bash "$ROOT/scripts/run_experiment_l40.sh")"
+  bash "$ROOT/scripts/run_experiment.sh" l40)"
 assert_contains "$out" "gpu_profile=l40 gpu_count=5"
 assert_contains "$out" "num_shards=5"
 assert_contains "$out" "max_parallel_cells=1 smoke_max_parallel_cells=1"
@@ -68,7 +68,7 @@ out="$(run_case l40-two-roomy-host \
   "${common_env[@]}" \
   HOST_MEMORY_MIB=163840 \
   SLURM_GPUS_ON_NODE=2 \
-  bash "$ROOT/scripts/run_experiment_l40.sh")"
+  bash "$ROOT/scripts/run_experiment.sh" l40)"
 assert_contains "$out" "gpu_profile=l40 gpu_count=2"
 assert_contains "$out" "gpu_detection_source=SLURM_GPUS_ON_NODE"
 assert_contains "$out" "max_parallel_cells=2 smoke_max_parallel_cells=1"
@@ -79,22 +79,37 @@ out="$(run_case h100-four \
   SKIP_INSTALL=1 \
   HOST_MEMORY_MIB=262144 \
   GPU_MEMORY_MIB=81559 \
+  GPU_COMPUTE_CAP=9.0 \
   GPU_NAMES="NVIDIA H100 80GB HBM3" \
   SLURM_STEP_GPUS=0,1,2,3 \
-  bash "$ROOT/scripts/run_experiment_h100.sh")"
+  bash "$ROOT/scripts/run_experiment.sh" h100)"
 assert_contains "$out" "gpu_profile=h100 gpu_count=4"
 assert_contains "$out" "num_shards=4"
 assert_contains "$out" "max_parallel_cells=4 smoke_max_parallel_cells=1"
 assert_contains "$out" "overlap_gepa_and_cells=1"
 assert_contains "$out" "sps_chain_batch_size=2"
 assert_contains "$out" "sps_vllm_batch_size=64"
+assert_contains "$out" "vllm_dtype=bfloat16"
+
+out="$(run_case titan-rtx-pre-ampere \
+  DRY_RUN=1 \
+  SKIP_INSTALL=1 \
+  HOST_MEMORY_MIB=131072 \
+  GPU_MEMORY_MIB=24220 \
+  GPU_COMPUTE_CAP=7.5 \
+  GPU_NAMES="NVIDIA TITAN RTX" \
+  SLURM_STEP_GPUS=0,1 \
+  bash "$ROOT/scripts/run_experiment.sh" l40)"
+assert_contains "$out" "gpu_profile=l40 gpu_count=2"
+assert_contains "$out" "gpu_min_compute_cap_x10=75"
+assert_contains "$out" "vllm_dtype=float16"
 
 out="$(run_case override-gpus \
   "${common_env[@]}" \
   HOST_MEMORY_MIB=163840 \
   GPUS=2,4 \
   SLURM_STEP_GPUS=0,1,2,3,4 \
-  bash "$ROOT/scripts/run_experiment_l40.sh")"
+  bash "$ROOT/scripts/run_experiment.sh" l40)"
 assert_contains "$out" "gpu_detection_source=GPUS"
 assert_contains "$out" "gpu_profile=l40 gpu_count=2 cuda_visible_devices=2,4"
 
@@ -129,7 +144,7 @@ out="$(run_case nvidia-smi-fallback \
   SKIP_INSTALL=1 \
   HOST_MEMORY_MIB=200000 \
   PATH="$tmpbin:$PATH" \
-  bash "$ROOT/scripts/run_experiment_l40.sh")"
+  bash "$ROOT/scripts/run_experiment.sh" l40)"
 assert_contains "$out" "gpu_profile=l40 gpu_count=3"
 assert_contains "$out" "gpu_detection_source=nvidia-smi"
 assert_contains "$out" "max_parallel_cells=2 smoke_max_parallel_cells=1"

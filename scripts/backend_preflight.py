@@ -141,6 +141,8 @@ def _classify_failure(returncode: int, stderr_tail: str) -> str:
         return "vllm_attention_shared_memory"
     if "token id" in text and "out of vocabulary" in text:
         return "invalid_token_id"
+    if "bfloat16 is only supported" in text and "compute capability" in text:
+        return "bf16_unsupported"
     if "cuda out of memory" in text or "torch.cuda.outofmemoryerror" in text:
         return "cuda_oom"
     if returncode == -9 or "oom_kill" in text or "out of memory" in text:
@@ -159,6 +161,7 @@ def _suggestion(kind: str) -> str:
             "avoid float32/xFormers for SPS on 48GB GPUs."
         ),
         "invalid_token_id": "Pull the latest token-mask fix and rerun this preflight.",
+        "bf16_unsupported": "Use VLLM_DTYPE=float16 on pre-Ampere GPUs such as TITAN RTX, T4, or V100.",
         "cuda_oom": "Lower VLLM_GPU_MEMORY_UTILIZATION or SPS_VLLM_BATCH_SIZE.",
         "host_oom_or_sigkill": "Lower MAX_PARALLEL_CELLS and request more host RAM.",
         "flash_attention_unavailable": (
@@ -182,28 +185,40 @@ def _candidate_list(args: argparse.Namespace) -> list[RuntimeCandidate]:
     )
     candidates = [first]
     if args.allow_fallbacks:
-        if first.prefix_caching:
+        fallback_dtypes = [first.dtype]
+        if first.dtype == "bfloat16":
+            fallback_dtypes.append("float16")
+        for dtype in fallback_dtypes:
             candidates.append(
                 RuntimeCandidate(
-                    dtype=first.dtype,
+                    dtype=dtype,
                     attention_backend=first.attention_backend,
-                    prefix_caching=False,
+                    prefix_caching=first.prefix_caching,
                     sps_vllm_batch_size=first.sps_vllm_batch_size,
                 )
             )
-        size = first.sps_vllm_batch_size
-        while size > 1:
-            size = max(1, size // 2)
-            candidates.append(
-                RuntimeCandidate(
-                    dtype=first.dtype,
-                    attention_backend=first.attention_backend,
-                    prefix_caching=False,
-                    sps_vllm_batch_size=size,
+            if first.prefix_caching:
+                candidates.append(
+                    RuntimeCandidate(
+                        dtype=dtype,
+                        attention_backend=first.attention_backend,
+                        prefix_caching=False,
+                        sps_vllm_batch_size=first.sps_vllm_batch_size,
+                    )
                 )
-            )
-            if size == 1:
-                break
+            size = first.sps_vllm_batch_size
+            while size > 1:
+                size = max(1, size // 2)
+                candidates.append(
+                    RuntimeCandidate(
+                        dtype=dtype,
+                        attention_backend=first.attention_backend,
+                        prefix_caching=False,
+                        sps_vllm_batch_size=size,
+                    )
+                )
+                if size == 1:
+                    break
     seen: set[tuple[str, str | None, bool, int]] = set()
     unique = []
     for candidate in candidates:

@@ -343,6 +343,38 @@ def test_run_condition_replays_non_greedy_from_trajectory_cache(tmp_path):
         cache.close()
 
 
+def test_run_condition_resumes_from_selected_checkpoint(tmp_path):
+    out_dir = tmp_path / "resume"
+    first_sampler = _DummySampler(canned_answer="42")
+    run_condition(
+        out_dir=out_dir,
+        condition="single_prompt_power",
+        sampler=first_sampler,
+        **{**_KW, "problems": _PROBLEMS[:1]},
+    )
+    (out_dir / "candidates.jsonl").write_text(
+        (out_dir / "candidates.jsonl").read_text(encoding="utf-8")
+        + '{"problem_id": "p2"',
+        encoding="utf-8",
+    )
+
+    second_sampler = _DummySampler(canned_answer="999")
+    metrics = run_condition(
+        out_dir=out_dir,
+        condition="single_prompt_power",
+        sampler=second_sampler,
+        **_KW,
+    )
+
+    assert second_sampler.power_calls == 8
+    assert metrics["accuracy"] == 0.5
+    assert len((out_dir / "selected.jsonl").read_text().splitlines()) == 2
+    assert len((out_dir / "candidates.jsonl").read_text().splitlines()) == 16
+    checkpoint = json.loads((out_dir / "checkpoint.json").read_text())
+    assert checkpoint["complete"] is True
+    assert checkpoint["completed_problem_ids"] == ["p1", "p2"]
+
+
 def test_run_condition_uses_batch_generation_when_available(tmp_path):
     sampler = _BatchDummySampler(canned_answer="42")
     kw = dict(_KW, problems=_PROBLEMS[:1])

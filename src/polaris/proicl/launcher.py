@@ -376,6 +376,31 @@ def cell_complete(cell: LaunchCell) -> bool:
     return int(metrics.get("n_problems", 0)) > 0
 
 
+def _launch_cell_matches(out: Path, cell: LaunchCell) -> bool:
+    path = out / "proicl_launch_cell.json"
+    if not path.exists():
+        return False
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) == cell.to_jsonable()
+    except Exception:
+        return False
+
+
+def _prepare_cell_artifact_dir(cell: LaunchCell) -> str:
+    out = Path(cell.artifact_dir)
+    if out.exists():
+        if not _launch_cell_matches(out, cell):
+            shutil.rmtree(out)
+            out.mkdir(parents=True, exist_ok=True)
+            write_json(out / "proicl_launch_cell.json", cell.to_jsonable())
+            return "fresh"
+        write_json(out / "proicl_launch_cell.json", cell.to_jsonable())
+        return "resume"
+    out.mkdir(parents=True, exist_ok=True)
+    write_json(out / "proicl_launch_cell.json", cell.to_jsonable())
+    return "fresh"
+
+
 def run_condition_command(
     *,
     repo_root: Path,
@@ -576,10 +601,7 @@ def run_cells(
                 cell = queue.pop(0)
                 gpu = available_gpus.pop(0)
                 out = Path(cell.artifact_dir)
-                if out.exists():
-                    shutil.rmtree(out)
-                out.mkdir(parents=True, exist_ok=True)
-                write_json(out / "proicl_launch_cell.json", cell.to_jsonable())
+                launch_mode = _prepare_cell_artifact_dir(cell)
                 cmd = run_condition_command(
                     repo_root=repo_root,
                     cell=cell,
@@ -619,19 +641,21 @@ def run_cells(
                     track=cell.track,
                     condition=cell.proicl_condition,
                     shard=cell.shard_id,
+                    mode=launch_mode,
                 )
                 progress.set_postfix_str(
-                    f"gpu={gpu} start {cell.track}/{cell.proicl_condition}/shard-{cell.shard_id}",
+                    f"gpu={gpu} {launch_mode} "
+                    f"{cell.track}/{cell.proicl_condition}/shard-{cell.shard_id}",
                     refresh=True,
                 )
                 _progress_write(
                     progress,
-                    "[ProICL] start "
+                    f"[ProICL] {launch_mode} "
                     f"gpu={gpu} track={cell.track} condition={cell.proicl_condition} "
                     f"shard={cell.shard_id}/{cell.num_shards} log={out / 'stderr.log'}",
                 )
-                stdout = (out / "stdout.json").open("w", encoding="utf-8")
-                stderr = (out / "stderr.log").open("w", encoding="utf-8")
+                stdout = (out / "stdout.json").open("a", encoding="utf-8")
+                stderr = (out / "stderr.log").open("a", encoding="utf-8")
                 proc = subprocess.Popen(cmd, cwd=repo_root, env=env, stdout=stdout, stderr=stderr)
                 stdout.close()
                 stderr.close()

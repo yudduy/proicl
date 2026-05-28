@@ -6,14 +6,16 @@ usage() {
 Run the ProICL held-out experiment.
 
 Default run:
-  bash scripts/run_experiment.sh
+  bash scripts/run_experiment.sh [auto|l40|a100|h100|generic]
+
+Compatibility aliases:
   bash scripts/run_experiment_l40.sh
   bash scripts/run_experiment_a100.sh
   bash scripts/run_experiment_h100.sh
 
 Useful overrides:
-  EVAL_END=30 ROLLOUT_BUDGET=2 bash scripts/run_experiment.sh
-  DRY_RUN=1 bash scripts/run_experiment.sh
+  EVAL_END=30 ROLLOUT_BUDGET=2 bash scripts/run_experiment.sh h100
+  DRY_RUN=1 bash scripts/run_experiment.sh l40
 
 Environment knobs:
   RUN_ROOT                 Output series directory. Default: runs/experiment
@@ -41,7 +43,8 @@ Environment knobs:
   SPS_ROLLOUTS_PER_CANDIDATE Lookahead rollouts per candidate. Default: 8
   SPS_ROLLOUT_HORIZON      Lookahead horizon tokens. Default: 128
   SPS_CHAIN_BATCH_SIZE     Archive-prompt SPS chains per vLLM batch. Default: GPU-aware.
-  GPU_PROFILE              auto, l40, a100, h100, or generic. Default: auto
+  GPU_PROFILE              auto, l40, a100, h100, or generic. Default: auto.
+                           Can also be supplied as the first positional arg.
   PROFILE_MAX_PARALLEL_CELLS Profile-level cap for concurrent cell workers.
   HOST_MEMORY_PER_CELL_MIB Host RAM budget per concurrent vLLM cell worker.
   HOST_MEMORY_RESERVE_MIB  Host RAM reserve before assigning cell workers.
@@ -59,6 +62,7 @@ Environment knobs:
   WANDB_PROJECT            W&B project when WANDB_API_KEY is set. Default: proicl.
   SKIP_CALIBRATION=1       Require VLLM_PARITY_ARTIFACT instead of running calibration.
   SKIP_SPS_MATH500_CALIBRATION=0 Run the slow SPS-vs-MCMC MATH500 gate. Default: skipped.
+  PYTHON                   Explicit Python 3.11+ interpreter. Overrides VENV auto-detection.
   SMOKE_ONLY=1             Developer-only: run only the harness smoke.
   INCLUDE_CANDIDATES=1     Include candidates.jsonl in the final bundle.
   PROICL_DISABLE_TQDM=1    Use plain progress lines instead of tqdm.
@@ -68,6 +72,39 @@ EOF
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
   exit 0
+fi
+
+PROFILE_ARG=""
+case "${1:-}" in
+  auto|l40|a100|h100|generic)
+    PROFILE_ARG="$1"
+    shift
+    ;;
+  --gpu-profile=*)
+    PROFILE_ARG="${1#--gpu-profile=}"
+    if [[ -z "$PROFILE_ARG" ]]; then
+      echo "--gpu-profile requires one of auto, l40, a100, h100, generic" >&2
+      exit 2
+    fi
+    shift
+    ;;
+  --gpu-profile)
+    if [[ -z "${2:-}" ]]; then
+      echo "--gpu-profile requires one of auto, l40, a100, h100, generic" >&2
+      exit 2
+    fi
+    PROFILE_ARG="$2"
+    shift 2
+    ;;
+esac
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
+if [[ $# -gt 0 ]]; then
+  echo "Unexpected argument: $1" >&2
+  echo "Usage: bash scripts/run_experiment.sh [auto|l40|a100|h100|generic]" >&2
+  exit 2
 fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -121,9 +158,27 @@ MATH_CALIB_MAX_NEW_TOKENS="${MATH_CALIB_MAX_NEW_TOKENS:-3072}"
 SPS_CALIBRATION_TOLERANCE="${SPS_CALIBRATION_TOLERANCE:-0.02}"
 
 VENV="${VENV:-.venv-eval}"
-PY="$REPO_ROOT/$VENV/bin/python"
-if [[ ! -x "$PY" ]]; then
-  PY="python"
+VENV_PY="$REPO_ROOT/$VENV/bin/python"
+NEED_CREATE_VENV=0
+if [[ -n "${PYTHON:-}" ]]; then
+  PY="$PYTHON"
+elif [[ -x "$VENV_PY" ]]; then
+  PY="$VENV_PY"
+else
+  NEED_CREATE_VENV=1
+  if command -v python3 >/dev/null 2>&1; then
+    PY="$(command -v python3)"
+  else
+    PY="python"
+  fi
+fi
+if ! "$PY" - <<'PY' >/dev/null 2>&1; then
+import sys
+raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
+PY
+  echo "ProICL requires Python >= 3.11; selected interpreter failed: $PY" >&2
+  echo "Create $VENV with Python 3.11+ or set PYTHON to a supported interpreter." >&2
+  exit 1
 fi
 
 normalize_gpu_csv() {
@@ -357,6 +412,73 @@ detect_min_gpu_memory_mib() {
   echo 0
 }
 
+detect_min_gpu_compute_cap_x10() {
+  if [[ -n "${GPU_COMPUTE_CAP:-}" ]]; then
+    awk -F',' '
+      {
+        for (i = 1; i <= NF; i++) {
+          value = $i
+          gsub(/^ +| +$/, "", value)
+          if (value ~ /^[0-9]+[.][0-9]+$/) {
+            split(value, parts, ".")
+            cap = parts[1] * 10 + parts[2]
+          } else {
+            gsub(/[^0-9]/, "", value)
+            cap = value + 0
+          }
+          if (cap > 0 && (min == 0 || cap < min)) min = cap
+        }
+      }
+      END { print min + 0 }
+    ' <<<"$GPU_COMPUTE_CAP"
+    return
+  fi
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    local raw_caps
+    raw_caps="$(nvidia-smi --query-gpu=index,compute_cap --format=csv,noheader,nounits 2>/dev/null || true)"
+    if [[ -n "$raw_caps" ]]; then
+      awk -v selected="${CUDA_VISIBLE_DEVICES:-}" -F',' '
+          BEGIN {
+            n = split(selected, parts, ",")
+            numeric_selected = 0
+            for (i = 1; i <= n; i++) {
+              gsub(/^ +| +$/, "", parts[i])
+              if (parts[i] ~ /^[0-9]+$/) {
+                wanted[parts[i]] = 1
+                numeric_selected = 1
+              }
+            }
+          }
+          {
+            idx = $1
+            cap_raw = $2
+            gsub(/^ +| +$/, "", idx)
+            gsub(/^ +| +$/, "", cap_raw)
+            if (numeric_selected && !(idx in wanted)) next
+            if (cap_raw ~ /^[0-9]+[.][0-9]+$/) {
+              split(cap_raw, parts2, ".")
+              cap = parts2[1] * 10 + parts2[2]
+            } else {
+              gsub(/[^0-9]/, "", cap_raw)
+              cap = cap_raw + 0
+            }
+            if (cap > 0 && (min == 0 || cap < min)) min = cap
+          }
+          END { print min + 0 }
+        ' <<<"$raw_caps"
+      return
+    fi
+  fi
+  case "$(tr '[:upper:]' '[:lower:]' <<<"${GPU_NAMES_DETECTED:-${GPU_NAMES:-}}")" in
+    *"titan rtx"*|*"rtx 20"*|*"2080"*|*"2070"*|*"2060"*|*"v100"*|*"t4"*)
+      echo 75
+      ;;
+    *)
+      echo 0
+      ;;
+  esac
+}
+
 _mib_from_bytes() {
   awk '{ printf "%d\n", $1 / 1024 / 1024 }'
 }
@@ -437,6 +559,7 @@ if [[ "$GPU_COUNT" -lt 1 ]]; then
 fi
 GPU_NAMES_DETECTED="$(detect_gpu_names)"
 GPU_MIN_MEMORY_MIB="$(detect_min_gpu_memory_mib)"
+GPU_MIN_COMPUTE_CAP_X10="$(detect_min_gpu_compute_cap_x10)"
 HOST_MEMORY_MIB_DETECTED="$(detect_host_memory_mib)"
 NUM_SHARDS="${NUM_SHARDS:-$GPU_COUNT}"
 if [[ "$EVAL_START" -lt 0 || "$EVAL_END" -le "$EVAL_START" ]]; then
@@ -447,7 +570,7 @@ EVAL_PROBLEM_COUNT=$((EVAL_END - EVAL_START))
 if [[ "$NUM_SHARDS" -gt "$EVAL_PROBLEM_COUNT" ]]; then
   NUM_SHARDS="$EVAL_PROBLEM_COUNT"
 fi
-GPU_PROFILE="${GPU_PROFILE:-auto}"
+GPU_PROFILE="${PROFILE_ARG:-${GPU_PROFILE:-auto}}"
 if [[ "$GPU_PROFILE" == "auto" ]]; then
   GPU_PROFILE="$(detect_gpu_profile)"
 fi
@@ -515,7 +638,9 @@ if [[ "$GPU_MIN_MEMORY_MIB" -gt 0 && "$GPU_MIN_MEMORY_MIB" -lt 60000 ]]; then
   DEFAULT_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.50"
   DEFAULT_SPS_CHAIN_BATCH_SIZE="1"
   DEFAULT_SPS_VLLM_BATCH_SIZE="${DEFAULT_SPS_VLLM_BATCH_SIZE:-16}"
-  DEFAULT_VLLM_DTYPE="bfloat16"
+fi
+if [[ "$GPU_MIN_COMPUTE_CAP_X10" -gt 0 && "$GPU_MIN_COMPUTE_CAP_X10" -lt 80 ]]; then
+  DEFAULT_VLLM_DTYPE="float16"
 fi
 
 ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL="${ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL:-$DEFAULT_WALL_CLOCK_SECONDS_PER_CELL}"
@@ -531,7 +656,14 @@ if [[ "$GPU_MIN_MEMORY_MIB" -gt 0 && "$GPU_MIN_MEMORY_MIB" -lt 60000 && "${ALLOW
   VLLM_GPU_MEMORY_UTILIZATION="0.80"
   CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="0.50"
   SPS_CHAIN_BATCH_SIZE="1"
-  VLLM_DTYPE="${VLLM_DTYPE:-bfloat16}"
+fi
+if [[ "$GPU_MIN_COMPUTE_CAP_X10" -gt 0 && "$GPU_MIN_COMPUTE_CAP_X10" -lt 80 && "$VLLM_DTYPE" == "bfloat16" ]]; then
+  if [[ "${ALLOW_UNSUPPORTED_BF16:-0}" == "1" ]]; then
+    echo "Warning: keeping VLLM_DTYPE=bfloat16 on compute capability ${GPU_MIN_COMPUTE_CAP_X10}; vLLM may reject this GPU." >&2
+  else
+    echo "Detected GPU compute capability ${GPU_MIN_COMPUTE_CAP_X10}; switching vLLM dtype from bfloat16 to float16." >&2
+    VLLM_DTYPE="float16"
+  fi
 fi
 PROFILE_MAX_PARALLEL_CELLS="${PROFILE_MAX_PARALLEL_CELLS:-$DEFAULT_PROFILE_MAX_PARALLEL_CELLS}"
 HOST_MEMORY_RESERVE_MIB="${HOST_MEMORY_RESERVE_MIB:-$DEFAULT_HOST_MEMORY_RESERVE_MIB}"
@@ -612,6 +744,7 @@ payload = {
     "gpu_detection_source": os.environ["PROICL_GPU_DETECTION_SOURCE"],
     "gpu_names": os.environ.get("PROICL_GPU_NAMES", "unknown"),
     "gpu_min_memory_mib": int(os.environ.get("PROICL_GPU_MIN_MEMORY_MIB", "0")),
+    "gpu_min_compute_cap_x10": int(os.environ.get("PROICL_GPU_MIN_COMPUTE_CAP_X10", "0")),
     "host_memory_mib": int(os.environ.get("PROICL_HOST_MEMORY_MIB", "0")),
     "gpu_count": int(os.environ["PROICL_GPU_COUNT"]),
     "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
@@ -696,6 +829,7 @@ payload = {
     "gpu_count": int(os.environ.get("PROICL_GPU_COUNT", "0")),
     "gpu_names": os.environ.get("PROICL_GPU_NAMES", "unknown"),
     "gpu_min_memory_mib": int(os.environ.get("PROICL_GPU_MIN_MEMORY_MIB", "0")),
+    "gpu_min_compute_cap_x10": int(os.environ.get("PROICL_GPU_MIN_COMPUTE_CAP_X10", "0")),
     "host_memory_mib": int(os.environ.get("PROICL_HOST_MEMORY_MIB", "0")),
     "max_parallel_cells": int(os.environ.get("PROICL_MAX_PARALLEL_CELLS", "0")),
     "smoke_max_parallel_cells": int(os.environ.get("PROICL_SMOKE_MAX_PARALLEL_CELLS", "0")),
@@ -718,9 +852,11 @@ PY
 print_launch_summary() {
   echo "ProICL launch profile:"
   echo "  gpu_profile=$GPU_PROFILE gpu_count=$GPU_COUNT cuda_visible_devices=${CUDA_VISIBLE_DEVICES:-all}"
+  echo "  python=$PY"
   echo "  gpu_detection_source=$GPU_DETECTION_SOURCE"
   echo "  gpu_names=$GPU_NAMES_DETECTED"
   echo "  gpu_min_memory_mib=$GPU_MIN_MEMORY_MIB"
+  echo "  gpu_min_compute_cap_x10=$GPU_MIN_COMPUTE_CAP_X10"
   echo "  host_memory_mib=$HOST_MEMORY_MIB_DETECTED"
   echo "  num_shards=$NUM_SHARDS strategy=$PARALLELISM_STRATEGY"
   echo "  max_parallel_cells=$MAX_PARALLEL_CELLS smoke_max_parallel_cells=$SMOKE_MAX_PARALLEL_CELLS overlap_gepa_and_cells=$OVERLAP_GEPA_AND_CELLS"
@@ -738,6 +874,7 @@ export PROICL_GPU_PROFILE="$GPU_PROFILE"
 export PROICL_GPU_DETECTION_SOURCE="$GPU_DETECTION_SOURCE"
 export PROICL_GPU_NAMES="$GPU_NAMES_DETECTED"
 export PROICL_GPU_MIN_MEMORY_MIB="$GPU_MIN_MEMORY_MIB"
+export PROICL_GPU_MIN_COMPUTE_CAP_X10="$GPU_MIN_COMPUTE_CAP_X10"
 export PROICL_HOST_MEMORY_MIB="$HOST_MEMORY_MIB_DETECTED"
 export PROICL_GPU_COUNT="$GPU_COUNT"
 export PROICL_NUM_SHARDS="$NUM_SHARDS"
@@ -803,8 +940,11 @@ fi
 if [[ "$DRY_RUN" != "1" && "$SKIP_INSTALL" != "1" ]]; then
   section "Installing ProICL dependencies ($INSTALL_PROFILE profile)"
   if [[ "$PY" == "python" ]]; then
-    run_cmd python -m venv "$VENV"
-    PY="$REPO_ROOT/$VENV/bin/python"
+    NEED_CREATE_VENV=1
+  fi
+  if [[ "$NEED_CREATE_VENV" == "1" ]]; then
+    run_cmd "$PY" -m venv "$VENV"
+    PY="$VENV_PY"
   fi
   run_cmd "$PY" -m pip install -U pip wheel setuptools
   case "$INSTALL_PROFILE" in

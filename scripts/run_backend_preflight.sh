@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Optional runtime check. The normal experiment runners do not call this.
-# Usage: bash scripts/run_backend_preflight.sh [l40|a100|h100]
+# Optional runtime check. The normal experiment runner does not call this.
+# Usage: bash scripts/run_backend_preflight.sh [auto|l40|a100|h100|generic]
 
 PROFILE="${1:-}"
 if [[ -n "$PROFILE" ]]; then
@@ -17,11 +17,11 @@ case "$PROFILE" in
   "")
     exec bash "$SCRIPT_DIR/run_experiment.sh" "$@"
     ;;
-  l40|a100|h100)
-    exec bash "$SCRIPT_DIR/run_experiment_${PROFILE}.sh" "$@"
+  auto|l40|a100|h100|generic)
+    exec bash "$SCRIPT_DIR/run_experiment.sh" "$PROFILE" "$@"
     ;;
   *)
-    echo "Usage: bash scripts/run_backend_preflight.sh [l40|a100|h100]" >&2
+    echo "Usage: bash scripts/run_backend_preflight.sh [auto|l40|a100|h100|generic]" >&2
     exit 2
     ;;
 esac

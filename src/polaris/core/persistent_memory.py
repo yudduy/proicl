@@ -116,7 +116,13 @@ class PersistentMemoryLedger:
         )
         self._conn.commit()
 
-    def update_posterior(self, entry_ids: Iterable[str], *, verifier_outcome: int) -> None:
+    def update_posterior(
+        self,
+        entry_ids: Iterable[str],
+        *,
+        verifier_outcome: int,
+        query_id: str | None = None,
+    ) -> None:
         if verifier_outcome not in (0, 1):
             raise ValueError("verifier_outcome must be 0 or 1")
         entry_ids = list(entry_ids)
@@ -133,10 +139,73 @@ class PersistentMemoryLedger:
         self.record_event(
             event_type="posterior_update",
             entry_ids=entry_ids,
-            query_id=None,
+            query_id=query_id,
             payload={"verifier_outcome": verifier_outcome},
         )
         self._conn.commit()
+
+    def rollback_incomplete_queries(
+        self,
+        completed_query_ids: Iterable[str],
+        *,
+        expected_query_ids: Iterable[str] | None = None,
+    ) -> int:
+        """Remove query-scoped memory updates that do not have a selected row.
+
+        Evaluation checkpoints treat a row in ``selected.jsonl`` as the commit
+        marker for a problem. If a process dies after mutating the memory ledger
+        but before writing that selected row, replay should not inherit those
+        partial retrieval/posterior/admission side effects.
+        """
+
+        completed = {str(query_id) for query_id in completed_query_ids}
+        expected = (
+            {str(query_id) for query_id in expected_query_ids}
+            if expected_query_ids is not None
+            else None
+        )
+        rows = [
+            dict(row)
+            for row in self._conn.execute(
+                """
+                SELECT id, event_type, entry_ids_json, query_id, payload_json
+                FROM memory_events
+                WHERE query_id IS NOT NULL
+                ORDER BY id DESC
+                """
+            )
+        ]
+        rolled_back = 0
+        for row in rows:
+            query_id = str(row["query_id"])
+            if query_id in completed:
+                continue
+            if expected is not None and query_id not in expected:
+                continue
+            entry_ids = json.loads(row["entry_ids_json"])
+            if row["event_type"] == "posterior_update":
+                payload = json.loads(row["payload_json"])
+                outcome = int(payload.get("verifier_outcome", 0))
+                for entry_id in entry_ids:
+                    self._conn.execute(
+                        """
+                        UPDATE memory_entries
+                        SET reliability_alpha = reliability_alpha - ?,
+                            reliability_beta = reliability_beta - ?
+                        WHERE id = ?
+                        """,
+                        (outcome, 1 - outcome, entry_id),
+                    )
+            elif row["event_type"] == "admission":
+                for entry_id in entry_ids:
+                    self._conn.execute(
+                        "DELETE FROM memory_entries WHERE id = ?",
+                        (entry_id,),
+                    )
+            self._conn.execute("DELETE FROM memory_events WHERE id = ?", (row["id"],))
+            rolled_back += 1
+        self._conn.commit()
+        return rolled_back
 
     def snapshot_posteriors(self, *, label: str) -> list[dict[str, Any]]:
         rows = [dict(row) for row in self._conn.execute("SELECT * FROM memory_entries")]

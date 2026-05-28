@@ -1427,7 +1427,7 @@ def smoke_archive_sps_one_problem_a100_40gb(
 
 def _smoke_run_experiment_script_impl(
     *,
-    profile_script: str,
+    gpu_profile: str,
     max_new_tokens: int = 64,
     vllm_max_model_len: int = 2048,
     smoke_only: bool = True,
@@ -1468,7 +1468,7 @@ env.update({{
 }})
 env.update({extra_env or {}!r})
 proc = subprocess.run(
-    ["bash", "/proicl/scripts/{profile_script}"],
+    ["bash", "/proicl/scripts/run_experiment.sh", {gpu_profile!r}],
     cwd="/proicl",
     env=env,
     text=True,
@@ -1516,10 +1516,10 @@ def smoke_run_experiment_script_l40(
     cost_cap_dollars: float | None = None,
     user_authorized_paid_run: bool = False,
 ) -> dict:
-    """Run scripts/run_experiment_l40.sh in SMOKE_ONLY mode on one Modal L40S."""
+    """Run scripts/run_experiment.sh l40 in SMOKE_ONLY mode on one Modal L40S."""
     # _require_modal_preflight is enforced inside _smoke_run_experiment_script_impl.
     return _smoke_run_experiment_script_impl(
-        profile_script="run_experiment_l40.sh",
+        gpu_profile="l40",
         max_new_tokens=max_new_tokens,
         vllm_max_model_len=vllm_max_model_len,
         estimated_dollar_cost=estimated_dollar_cost,
@@ -1541,7 +1541,7 @@ def smoke_backend_matrix_l40s(
     """Run production-shaped SPS/vLLM backend preflight on one Modal L40S."""
     # _require_modal_preflight is enforced inside _smoke_run_experiment_script_impl.
     return _smoke_run_experiment_script_impl(
-        profile_script="run_experiment_l40.sh",
+        gpu_profile="l40",
         max_new_tokens=1024,
         vllm_max_model_len=4096,
         smoke_only=True,
@@ -1580,7 +1580,7 @@ def smoke_run_experiment_script_l40s_2gpu(
     """Run a release-shaped two-GPU L40S smoke that must produce a bundle."""
     # _require_modal_preflight is enforced inside _smoke_run_experiment_script_impl.
     return _smoke_run_experiment_script_impl(
-        profile_script="run_experiment_l40.sh",
+        gpu_profile="l40",
         max_new_tokens=max_new_tokens,
         vllm_max_model_len=vllm_max_model_len,
         smoke_only=False,
@@ -1620,10 +1620,10 @@ def smoke_run_experiment_script_a100_40gb(
     cost_cap_dollars: float | None = None,
     user_authorized_paid_run: bool = False,
 ) -> dict:
-    """Run scripts/run_experiment_a100.sh in SMOKE_ONLY mode on one A100-40GB."""
+    """Run scripts/run_experiment.sh a100 in SMOKE_ONLY mode on one A100-40GB."""
     # _require_modal_preflight is enforced inside _smoke_run_experiment_script_impl.
     return _smoke_run_experiment_script_impl(
-        profile_script="run_experiment_a100.sh",
+        gpu_profile="a100",
         max_new_tokens=max_new_tokens,
         vllm_max_model_len=vllm_max_model_len,
         estimated_dollar_cost=estimated_dollar_cost,
@@ -1644,10 +1644,10 @@ def smoke_run_experiment_script_h100(
     cost_cap_dollars: float | None = None,
     user_authorized_paid_run: bool = False,
 ) -> dict:
-    """Run scripts/run_experiment_h100.sh in SMOKE_ONLY mode on one H100."""
+    """Run scripts/run_experiment.sh h100 in SMOKE_ONLY mode on one H100."""
     # _require_modal_preflight is enforced inside _smoke_run_experiment_script_impl.
     return _smoke_run_experiment_script_impl(
-        profile_script="run_experiment_h100.sh",
+        gpu_profile="h100",
         max_new_tokens=max_new_tokens,
         vllm_max_model_len=vllm_max_model_len,
         estimated_dollar_cost=estimated_dollar_cost,

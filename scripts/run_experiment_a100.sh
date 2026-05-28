@@ -1,17 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# A100 profile. Works for A100-40GB/80GB; the shared runner further lowers
-# SPS batching when it sees sub-60GB VRAM.
-export GPU_PROFILE="${GPU_PROFILE:-a100}"
-export REFLECTION_PROVIDER="${REFLECTION_PROVIDER:-local-hf}"
-export SPS_CHAIN_BATCH_SIZE="${SPS_CHAIN_BATCH_SIZE:-2}"
-export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.85}"
-export CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="${CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION:-0.55}"
-export PROFILE_MAX_PARALLEL_CELLS="${PROFILE_MAX_PARALLEL_CELLS:-4}"
-export HOST_MEMORY_RESERVE_MIB="${HOST_MEMORY_RESERVE_MIB:-32768}"
-export HOST_MEMORY_PER_CELL_MIB="${HOST_MEMORY_PER_CELL_MIB:-40960}"
-export SMOKE_MAX_PARALLEL_CELLS="${SMOKE_MAX_PARALLEL_CELLS:-1}"
-
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-exec bash "$SCRIPT_DIR/run_experiment.sh" "$@"
+exec bash "$SCRIPT_DIR/run_experiment.sh" a100 "$@"
