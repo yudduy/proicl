@@ -6,7 +6,7 @@ usage() {
 Run the ProICL held-out experiment.
 
 Default run:
-  bash scripts/run_experiment.sh [auto|l40|a100|h100|generic]
+  bash scripts/run_experiment.sh [auto|l40|a100|h100|generic] [options]
 
 Compatibility aliases:
   bash scripts/run_experiment_l40.sh
@@ -16,11 +16,11 @@ Compatibility aliases:
 Useful overrides:
   EVAL_END=30 ROLLOUT_BUDGET=2 bash scripts/run_experiment.sh h100
   DRY_RUN=1 bash scripts/run_experiment.sh l40
+  bash scripts/run_experiment.sh auto --resume latest --progress-interval 60
 
 Environment knobs:
   RUN_ROOT                 Output series directory. Default: runs/experiment
   RUN_TAG                  Short tag inside the standardized run id. Default: heldout
-  RUN_TIMESTAMP            Optional UTC run timestamp. Set to resume a failed run directory.
   TRACKS                   Eval tracks. Default: boxnet acre game_of_life_halting graph_color_n12
   ARCHIVE_TRAIN_TRACKS     GEPA training tracks. Default: five in-distribution Reasoning Gym tasks
   ARCHIVE_HELDOUT_TRACKS   Held-out tracks for cross-family provenance. Default: TRACKS
@@ -63,50 +63,116 @@ Environment knobs:
   SKIP_CALIBRATION=1       Require VLLM_PARITY_ARTIFACT instead of running calibration.
   SKIP_SPS_MATH500_CALIBRATION=0 Run the slow SPS-vs-MCMC MATH500 gate. Default: skipped.
   PYTHON                   Explicit Python 3.11/3.12 interpreter. Overrides VENV auto-detection.
-  PROICL_CELL_HEARTBEAT_SECONDS Active-cell heartbeat interval. Default: 300; 0 disables.
   SMOKE_ONLY=1             Developer-only: run only the harness smoke.
   INCLUDE_CANDIDATES=1     Include candidates.jsonl in the final bundle.
   PROICL_DISABLE_TQDM=1    Use plain progress lines instead of tqdm.
+
+Options:
+  --gpu-profile PROFILE    auto, l40, a100, h100, or generic.
+  --resume [TARGET]        Resume latest, a UTC timestamp, a run id, or a run directory.
+                           With no TARGET, resumes latest.
+  --resume-latest          Alias for --resume latest.
+  --fresh                  Force a new run.
+  --progress-interval SEC  Active-cell progress update interval. Default: 300.
+                           Use "off" or --quiet-progress to disable.
 EOF
 }
 
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  usage
-  exit 0
-fi
-
 PROFILE_ARG=""
-case "${1:-}" in
-  auto|l40|a100|h100|generic)
-    PROFILE_ARG="$1"
-    shift
-    ;;
-  --gpu-profile=*)
-    PROFILE_ARG="${1#--gpu-profile=}"
-    if [[ -z "$PROFILE_ARG" ]]; then
-      echo "--gpu-profile requires one of auto, l40, a100, h100, generic" >&2
+RESUME_ARG="${RESUME:-}"
+FRESH_RUN=0
+HEARTBEAT_ARG="${PROICL_CELL_HEARTBEAT_SECONDS:-}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    auto|l40|a100|h100|generic)
+      if [[ -n "$PROFILE_ARG" ]]; then
+        echo "GPU profile was provided more than once: $PROFILE_ARG and $1" >&2
+        exit 2
+      fi
+      PROFILE_ARG="$1"
+      shift
+      ;;
+    --gpu-profile=*)
+      if [[ -n "$PROFILE_ARG" ]]; then
+        echo "GPU profile was provided more than once: $PROFILE_ARG and ${1#--gpu-profile=}" >&2
+        exit 2
+      fi
+      PROFILE_ARG="${1#--gpu-profile=}"
+      if [[ -z "$PROFILE_ARG" ]]; then
+        echo "--gpu-profile requires one of auto, l40, a100, h100, generic" >&2
+        exit 2
+      fi
+      shift
+      ;;
+    --gpu-profile)
+      if [[ -z "${2:-}" ]]; then
+        echo "--gpu-profile requires one of auto, l40, a100, h100, generic" >&2
+        exit 2
+      fi
+      if [[ -n "$PROFILE_ARG" ]]; then
+        echo "GPU profile was provided more than once: $PROFILE_ARG and $2" >&2
+        exit 2
+      fi
+      PROFILE_ARG="$2"
+      shift 2
+      ;;
+    --resume=*)
+      RESUME_ARG="${1#--resume=}"
+      if [[ -z "$RESUME_ARG" ]]; then
+        RESUME_ARG="latest"
+      fi
+      FRESH_RUN=0
+      shift
+      ;;
+    --resume)
+      if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
+        RESUME_ARG="$2"
+        shift 2
+      else
+        RESUME_ARG="latest"
+        shift
+      fi
+      FRESH_RUN=0
+      ;;
+    --resume-latest)
+      RESUME_ARG="latest"
+      FRESH_RUN=0
+      shift
+      ;;
+    --fresh)
+      RESUME_ARG=""
+      RUN_TIMESTAMP=""
+      FRESH_RUN=1
+      shift
+      ;;
+    --progress-interval=*|--heartbeat=*)
+      HEARTBEAT_ARG="${1#--heartbeat=}"
+      HEARTBEAT_ARG="${HEARTBEAT_ARG#--progress-interval=}"
+      shift
+      ;;
+    --progress-interval|--heartbeat)
+      if [[ -z "${2:-}" || "${2:-}" == --* ]]; then
+        echo "$1 requires seconds or off" >&2
+        exit 2
+      fi
+      HEARTBEAT_ARG="$2"
+      shift 2
+      ;;
+    --quiet-progress|--no-heartbeat)
+      HEARTBEAT_ARG="off"
+      shift
+      ;;
+    *)
+      echo "Unexpected argument: $1" >&2
+      echo "Usage: bash scripts/run_experiment.sh [auto|l40|a100|h100|generic] [--resume latest] [--progress-interval 60]" >&2
       exit 2
-    fi
-    shift
-    ;;
-  --gpu-profile)
-    if [[ -z "${2:-}" ]]; then
-      echo "--gpu-profile requires one of auto, l40, a100, h100, generic" >&2
-      exit 2
-    fi
-    PROFILE_ARG="$2"
-    shift 2
-    ;;
-esac
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-  usage
-  exit 0
-fi
-if [[ $# -gt 0 ]]; then
-  echo "Unexpected argument: $1" >&2
-  echo "Usage: bash scripts/run_experiment.sh [auto|l40|a100|h100|generic]" >&2
-  exit 2
-fi
+      ;;
+  esac
+done
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -194,6 +260,136 @@ if ! python_is_supported "$PY"; then
   echo "ProICL requires Python 3.11 or 3.12 because vLLM 0.9.2 does not publish Python 3.13+ wheels; selected interpreter failed: $PY" >&2
   echo "Create $VENV with Python 3.11/3.12 or set PYTHON to a supported interpreter." >&2
   exit 1
+fi
+
+resolve_resume_timestamp() {
+  local target="$1"
+  "$PY" - "$RUN_ROOT" "$target" "$RUN_TAG" "$RUN_STAGE" "$TRACKS" "$CONDITIONS" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+base = Path(sys.argv[1])
+target = sys.argv[2] or "latest"
+run_tag = sys.argv[3] or None
+run_stage = sys.argv[4] or None
+tracks = sys.argv[5].split()
+conditions = sys.argv[6].split()
+stamp_re = re.compile(r"(\d{8}T\d{6}Z)")
+
+
+def stamp_from_text(value: str) -> str | None:
+    match = stamp_re.search(value)
+    return match.group(1) if match else None
+
+
+def stamp_from_path(value: str) -> str | None:
+    path = Path(value)
+    if path.name == "full":
+        path = path.parent
+    return stamp_from_text(path.name) or stamp_from_text(value)
+
+
+def run_index_candidates() -> list[tuple[str, float, str]]:
+    candidates: list[tuple[str, float, str]] = []
+    if not base.exists():
+        return candidates
+    for run_index in base.glob("proicl_*/run_index.json"):
+        try:
+            payload = json.loads(run_index.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        identity = payload.get("identity", {})
+        if run_tag and identity.get("tag") != run_tag:
+            continue
+        if run_stage and identity.get("run_stage") != run_stage:
+            continue
+        if tracks and payload.get("tracks") != tracks:
+            continue
+        if conditions and payload.get("conditions") != conditions:
+            continue
+        stamp = identity.get("timestamp") or stamp_from_text(identity.get("run_id", ""))
+        if not stamp:
+            continue
+        try:
+            mtime = run_index.parent.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        candidates.append((stamp, mtime, str(run_index.parent)))
+    return candidates
+
+
+def directory_candidates() -> list[tuple[str, float, str]]:
+    candidates: list[tuple[str, float, str]] = []
+    if not base.exists():
+        return candidates
+    tag_token = f"_{run_tag}_" if run_tag else None
+    for path in base.glob("proicl_*"):
+        if not path.is_dir():
+            continue
+        if tag_token and tag_token not in path.name:
+            continue
+        if run_stage and f"proicl_{run_stage.replace('_', '-')}" not in path.name:
+            continue
+        stamp = stamp_from_text(path.name)
+        if not stamp:
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        candidates.append((stamp, mtime, str(path)))
+    return candidates
+
+
+if target in {"", "latest"}:
+    candidates = run_index_candidates() or directory_candidates()
+    if not candidates:
+        raise SystemExit(f"No matching ProICL run found under {base} for --resume latest")
+    print(max(candidates, key=lambda item: (item[0], item[1]))[0])
+    raise SystemExit(0)
+
+stamp = stamp_from_path(target)
+if stamp:
+    print(stamp)
+    raise SystemExit(0)
+
+candidate_path = base / target
+stamp = stamp_from_path(str(candidate_path))
+if stamp:
+    print(stamp)
+    raise SystemExit(0)
+
+raise SystemExit(
+    "--resume target must be latest, a UTC timestamp, a standardized run id, "
+    f"or a run directory; got {target!r}"
+)
+PY
+}
+
+if [[ -n "${HEARTBEAT_ARG:-}" ]]; then
+  case "$HEARTBEAT_ARG" in
+    off|none|false|False|0)
+      export PROICL_CELL_HEARTBEAT_SECONDS=0
+      ;;
+    *)
+      if ! awk 'BEGIN { exit !(ARGV[1] ~ /^[0-9]+([.][0-9]+)?$/) }' "$HEARTBEAT_ARG"; then
+        echo "--progress-interval requires seconds or off; got $HEARTBEAT_ARG" >&2
+        exit 2
+      fi
+      export PROICL_CELL_HEARTBEAT_SECONDS="$HEARTBEAT_ARG"
+      ;;
+  esac
+fi
+RESUME_SOURCE="fresh"
+if [[ "$FRESH_RUN" == "1" ]]; then
+  RUN_TIMESTAMP=""
+elif [[ -n "$RESUME_ARG" ]]; then
+  RUN_TIMESTAMP="$(resolve_resume_timestamp "$RESUME_ARG")"
+  RESUME_SOURCE="$RESUME_ARG"
+elif [[ -n "${RUN_TIMESTAMP:-}" ]]; then
+  RESUME_SOURCE="legacy-env"
 fi
 
 normalize_gpu_csv() {
@@ -785,6 +981,9 @@ payload = {
     "run_root": os.environ["PROICL_RUN_ROOT"],
     "run_tag": os.environ["PROICL_RUN_TAG"],
     "run_timestamp": os.environ.get("PROICL_RUN_TIMESTAMP") or None,
+    "resume_source": os.environ.get("PROICL_RESUME_SOURCE") or "fresh",
+    "progress_interval_seconds": float(os.environ.get("PROICL_CELL_HEARTBEAT_SECONDS", "300")),
+    "cell_heartbeat_seconds": float(os.environ.get("PROICL_CELL_HEARTBEAT_SECONDS", "300")),
     "reflection_provider": os.environ["PROICL_REFLECTION_PROVIDER"],
     "tracks": os.environ["PROICL_TRACKS"].split(),
     "conditions": os.environ["PROICL_CONDITIONS"].split(),
@@ -856,6 +1055,8 @@ payload = {
     "vllm_prefix_caching": os.environ.get("PROICL_VLLM_PREFIX_CACHING") == "1",
     "calibration_dtype": os.environ.get("PROICL_CALIBRATION_DTYPE"),
     "sps_vllm_batch_size": int(os.environ.get("PROICL_SPS_VLLM_BATCH_SIZE", "0")),
+    "progress_interval_seconds": float(os.environ.get("PROICL_CELL_HEARTBEAT_SECONDS", "300")),
+    "cell_heartbeat_seconds": float(os.environ.get("PROICL_CELL_HEARTBEAT_SECONDS", "300")),
     "slurm": {key: os.environ.get(key) for key in slurm_keys if os.environ.get(key) is not None},
 }
 with open(out, "w", encoding="utf-8") as f:
@@ -881,6 +1082,8 @@ print_launch_summary() {
   echo "  sps_vllm_batch_size=$SPS_VLLM_BATCH_SIZE"
   echo "  vllm_dtype=$VLLM_DTYPE vllm_attention_backend=${VLLM_ATTENTION_BACKEND:-auto} vllm_prefix_caching=$VLLM_PREFIX_CACHING"
   echo "  calibration_dtype=$CALIBRATION_DTYPE"
+  echo "  resume_source=$RESUME_SOURCE run_timestamp=${RUN_TIMESTAMP:-new}"
+  echo "  progress_interval_seconds=${PROICL_CELL_HEARTBEAT_SECONDS:-300}"
   echo "  reflection_provider=$REFLECTION_PROVIDER"
   echo "  estimated_wall_clock_seconds_per_cell=$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
 }
@@ -910,6 +1113,7 @@ export PROICL_ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL="$ESTIMATED_WALL_CLOCK_SECON
 export PROICL_RUN_ROOT="$RUN_ROOT"
 export PROICL_RUN_TAG="$RUN_TAG"
 export PROICL_RUN_TIMESTAMP="$RUN_TIMESTAMP"
+export PROICL_RESUME_SOURCE="$RESUME_SOURCE"
 export PROICL_REFLECTION_PROVIDER="$REFLECTION_PROVIDER"
 export PROICL_TRACKS="$TRACKS"
 export PROICL_CONDITIONS="$CONDITIONS"

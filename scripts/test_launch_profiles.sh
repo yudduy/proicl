@@ -113,6 +113,20 @@ out="$(run_case override-gpus \
 assert_contains "$out" "gpu_detection_source=GPUS"
 assert_contains "$out" "gpu_profile=l40 gpu_count=2 cuda_visible_devices=2,4"
 
+resume_root="$(mktemp -d)"
+mkdir -p "$resume_root/proicl_small-real-slice_custom-4t_cross-family-curriculum_vllm_heldout_20260528T235310Z"
+mkdir -p "$resume_root/proicl_small-real-slice_custom-4t_cross-family-curriculum_vllm_heldout_20260529T010203Z"
+out="$(run_case resume-latest-cli \
+  "${common_env[@]}" \
+  RUN_ROOT="$resume_root" \
+  HOST_MEMORY_MIB=65536 \
+  SLURM_STEP_GPUS=0 \
+  bash "$ROOT/scripts/run_experiment.sh" l40 --resume latest --progress-interval 60)"
+assert_contains "$out" "resume_source=latest run_timestamp=20260529T010203Z"
+assert_contains "$out" "progress_interval_seconds=60"
+assert_contains "$out" "--run-timestamp 20260529T010203Z"
+rm -rf "$resume_root"
+
 tmpbin="$(mktemp -d)"
 trap 'rm -rf "$tmpbin"' EXIT
 cat >"$tmpbin/nvidia-smi" <<'SH'
