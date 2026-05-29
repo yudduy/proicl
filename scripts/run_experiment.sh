@@ -6,6 +6,7 @@ usage() {
 Run the ProICL held-out experiment.
 
 Default run:
+  bash scripts/run_experiment.sh
   bash scripts/run_experiment.sh [auto|l40|a100|h100|generic] [options]
 
 Compatibility aliases:
@@ -16,7 +17,6 @@ Compatibility aliases:
 Useful overrides:
   EVAL_END=30 ROLLOUT_BUDGET=2 bash scripts/run_experiment.sh h100
   DRY_RUN=1 bash scripts/run_experiment.sh l40
-  bash scripts/run_experiment.sh auto --resume latest --progress-interval 60
 
 Environment knobs:
   RUN_ROOT                 Output series directory. Default: runs/experiment
@@ -65,21 +65,21 @@ Environment knobs:
   PYTHON                   Explicit Python 3.11/3.12 interpreter. Overrides VENV auto-detection.
   SMOKE_ONLY=1             Developer-only: run only the harness smoke.
   INCLUDE_CANDIDATES=1     Include candidates.jsonl in the final bundle.
-  PROICL_DISABLE_TQDM=1    Use plain progress lines instead of tqdm.
+  PROICL_DISABLE_TQDM=0    Use tqdm progress bars instead of plain progress lines.
 
 Options:
   --gpu-profile PROFILE    auto, l40, a100, h100, or generic.
-  --resume [TARGET]        Resume latest, a UTC timestamp, a run id, or a run directory.
-                           With no TARGET, resumes latest.
+  --resume [TARGET]        Resume auto, latest, a UTC timestamp, a run id, or a run directory.
+                           Default: auto, which resumes the latest incomplete matching run.
   --resume-latest          Alias for --resume latest.
   --fresh                  Force a new run.
-  --progress-interval SEC  Active-cell progress update interval. Default: 300.
+  --progress-interval SEC  Active-cell progress update interval. Default: 60.
                            Use "off" or --quiet-progress to disable.
 EOF
 }
 
 PROFILE_ARG=""
-RESUME_ARG="${RESUME:-}"
+RESUME_ARG="${RESUME:-auto}"
 FRESH_RUN=0
 HEARTBEAT_ARG="${PROICL_CELL_HEARTBEAT_SECONDS:-}"
 while [[ $# -gt 0 ]]; do
@@ -168,7 +168,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unexpected argument: $1" >&2
-      echo "Usage: bash scripts/run_experiment.sh [auto|l40|a100|h100|generic] [--resume latest] [--progress-interval 60]" >&2
+      echo "Usage: bash scripts/run_experiment.sh [auto|l40|a100|h100|generic] [--fresh]" >&2
       exit 2
       ;;
   esac
@@ -189,6 +189,7 @@ fi
 SMOKE_ONLY="${SMOKE_ONLY:-0}"
 PREFLIGHT_ONLY="${PREFLIGHT_ONLY:-0}"
 INCLUDE_CANDIDATES="${INCLUDE_CANDIDATES:-0}"
+export PROICL_DISABLE_TQDM="${PROICL_DISABLE_TQDM:-1}"
 
 RUN_ROOT="${RUN_ROOT:-runs/experiment}"
 RUN_TAG="${RUN_TAG:-heldout}"
@@ -264,7 +265,7 @@ fi
 
 resolve_resume_timestamp() {
   local target="$1"
-  "$PY" - "$RUN_ROOT" "$target" "$RUN_TAG" "$RUN_STAGE" "$TRACKS" "$CONDITIONS" <<'PY'
+  "$PY" - "$RUN_ROOT" "$target" "$RUN_TAG" "$RUN_STAGE" "$TRACKS" "$CONDITIONS" "$SMOKE_ONLY" <<'PY'
 import json
 import re
 import sys
@@ -276,6 +277,7 @@ run_tag = sys.argv[3] or None
 run_stage = sys.argv[4] or None
 tracks = sys.argv[5].split()
 conditions = sys.argv[6].split()
+smoke_only = sys.argv[7] == "1"
 stamp_re = re.compile(r"(\d{8}T\d{6}Z)")
 
 
@@ -320,6 +322,12 @@ def run_index_candidates() -> list[tuple[str, float, str]]:
     return candidates
 
 
+def is_packaged(run_path: str) -> bool:
+    path = Path(run_path)
+    bundle_roots = [path / ("smoke" if smoke_only else "full"), path]
+    return any((root / "results_bundle.tar.gz").exists() for root in bundle_roots)
+
+
 def directory_candidates() -> list[tuple[str, float, str]]:
     candidates: list[tuple[str, float, str]] = []
     if not base.exists():
@@ -343,8 +351,13 @@ def directory_candidates() -> list[tuple[str, float, str]]:
     return candidates
 
 
-if target in {"", "latest"}:
+if target in {"", "auto", "latest"}:
     candidates = run_index_candidates() or directory_candidates()
+    if target in {"", "auto"}:
+        candidates = [item for item in candidates if not is_packaged(item[2])]
+        if not candidates:
+            print("")
+            raise SystemExit(0)
     if not candidates:
         raise SystemExit(f"No matching ProICL run found under {base} for --resume latest")
     print(max(candidates, key=lambda item: (item[0], item[1]))[0])
@@ -381,13 +394,19 @@ if [[ -n "${HEARTBEAT_ARG:-}" ]]; then
       export PROICL_CELL_HEARTBEAT_SECONDS="$HEARTBEAT_ARG"
       ;;
   esac
+else
+  export PROICL_CELL_HEARTBEAT_SECONDS=60
 fi
 RESUME_SOURCE="fresh"
 if [[ "$FRESH_RUN" == "1" ]]; then
   RUN_TIMESTAMP=""
+elif [[ -n "${RUN_TIMESTAMP:-}" && "$RESUME_ARG" == "auto" ]]; then
+  RESUME_SOURCE="legacy-env"
 elif [[ -n "$RESUME_ARG" ]]; then
   RUN_TIMESTAMP="$(resolve_resume_timestamp "$RESUME_ARG")"
-  RESUME_SOURCE="$RESUME_ARG"
+  if [[ -n "$RUN_TIMESTAMP" ]]; then
+    RESUME_SOURCE="$RESUME_ARG"
+  fi
 elif [[ -n "${RUN_TIMESTAMP:-}" ]]; then
   RESUME_SOURCE="legacy-env"
 fi
@@ -982,8 +1001,8 @@ payload = {
     "run_tag": os.environ["PROICL_RUN_TAG"],
     "run_timestamp": os.environ.get("PROICL_RUN_TIMESTAMP") or None,
     "resume_source": os.environ.get("PROICL_RESUME_SOURCE") or "fresh",
-    "progress_interval_seconds": float(os.environ.get("PROICL_CELL_HEARTBEAT_SECONDS", "300")),
-    "cell_heartbeat_seconds": float(os.environ.get("PROICL_CELL_HEARTBEAT_SECONDS", "300")),
+    "progress_interval_seconds": float(os.environ.get("PROICL_CELL_HEARTBEAT_SECONDS", "60")),
+    "cell_heartbeat_seconds": float(os.environ.get("PROICL_CELL_HEARTBEAT_SECONDS", "60")),
     "reflection_provider": os.environ["PROICL_REFLECTION_PROVIDER"],
     "tracks": os.environ["PROICL_TRACKS"].split(),
     "conditions": os.environ["PROICL_CONDITIONS"].split(),
@@ -1055,8 +1074,8 @@ payload = {
     "vllm_prefix_caching": os.environ.get("PROICL_VLLM_PREFIX_CACHING") == "1",
     "calibration_dtype": os.environ.get("PROICL_CALIBRATION_DTYPE"),
     "sps_vllm_batch_size": int(os.environ.get("PROICL_SPS_VLLM_BATCH_SIZE", "0")),
-    "progress_interval_seconds": float(os.environ.get("PROICL_CELL_HEARTBEAT_SECONDS", "300")),
-    "cell_heartbeat_seconds": float(os.environ.get("PROICL_CELL_HEARTBEAT_SECONDS", "300")),
+    "progress_interval_seconds": float(os.environ.get("PROICL_CELL_HEARTBEAT_SECONDS", "60")),
+    "cell_heartbeat_seconds": float(os.environ.get("PROICL_CELL_HEARTBEAT_SECONDS", "60")),
     "slurm": {key: os.environ.get(key) for key in slurm_keys if os.environ.get(key) is not None},
 }
 with open(out, "w", encoding="utf-8") as f:
@@ -1083,7 +1102,7 @@ print_launch_summary() {
   echo "  vllm_dtype=$VLLM_DTYPE vllm_attention_backend=${VLLM_ATTENTION_BACKEND:-auto} vllm_prefix_caching=$VLLM_PREFIX_CACHING"
   echo "  calibration_dtype=$CALIBRATION_DTYPE"
   echo "  resume_source=$RESUME_SOURCE run_timestamp=${RUN_TIMESTAMP:-new}"
-  echo "  progress_interval_seconds=${PROICL_CELL_HEARTBEAT_SECONDS:-300}"
+  echo "  progress_interval_seconds=${PROICL_CELL_HEARTBEAT_SECONDS:-60}"
   echo "  reflection_provider=$REFLECTION_PROVIDER"
   echo "  estimated_wall_clock_seconds_per_cell=$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
 }

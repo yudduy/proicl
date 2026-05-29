@@ -2,6 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TEST_RUN_ROOT="$(mktemp -d)"
+tmpbin=""
+trap 'rm -rf "$TEST_RUN_ROOT" "${tmpbin:-}"' EXIT
 
 run_case() {
   local name="$1"
@@ -34,6 +37,7 @@ common_env=(
   DRY_RUN=1
   SKIP_INSTALL=1
   SKIP_CALIBRATION=0
+  RUN_ROOT="$TEST_RUN_ROOT"
   GPU_MEMORY_MIB=49140
   GPU_NAMES="NVIDIA L40S"
 )
@@ -50,6 +54,8 @@ assert_contains "$out" "max_parallel_cells=1 smoke_max_parallel_cells=1"
 assert_contains "$out" "vllm_dtype=bfloat16"
 assert_contains "$out" "vllm_attention_backend=FLASH_ATTN"
 assert_contains "$out" "calibration_dtype=float32"
+assert_contains "$out" "resume_source=fresh run_timestamp=new"
+assert_contains "$out" "progress_interval_seconds=60"
 assert_contains "$out" "sps_vllm_batch_size=32"
 assert_contains "$out" "--skip-smoke"
 assert_not_contains "$out" "--smoke-only"
@@ -116,6 +122,17 @@ assert_contains "$out" "gpu_profile=l40 gpu_count=2 cuda_visible_devices=2,4"
 resume_root="$(mktemp -d)"
 mkdir -p "$resume_root/proicl_small-real-slice_custom-4t_cross-family-curriculum_vllm_heldout_20260528T235310Z"
 mkdir -p "$resume_root/proicl_small-real-slice_custom-4t_cross-family-curriculum_vllm_heldout_20260529T010203Z"
+mkdir -p "$resume_root/proicl_small-real-slice_custom-4t_cross-family-curriculum_vllm_heldout_20260529T010203Z/full"
+touch "$resume_root/proicl_small-real-slice_custom-4t_cross-family-curriculum_vllm_heldout_20260529T010203Z/full/results_bundle.tar.gz"
+out="$(run_case auto-resume-incomplete \
+  "${common_env[@]}" \
+  RUN_ROOT="$resume_root" \
+  HOST_MEMORY_MIB=65536 \
+  SLURM_STEP_GPUS=0 \
+  bash "$ROOT/scripts/run_experiment.sh" l40)"
+assert_contains "$out" "resume_source=auto run_timestamp=20260528T235310Z"
+assert_contains "$out" "progress_interval_seconds=60"
+assert_contains "$out" "--run-timestamp 20260528T235310Z"
 out="$(run_case resume-latest-cli \
   "${common_env[@]}" \
   RUN_ROOT="$resume_root" \
@@ -125,10 +142,17 @@ out="$(run_case resume-latest-cli \
 assert_contains "$out" "resume_source=latest run_timestamp=20260529T010203Z"
 assert_contains "$out" "progress_interval_seconds=60"
 assert_contains "$out" "--run-timestamp 20260529T010203Z"
+out="$(run_case fresh-overrides-resume \
+  "${common_env[@]}" \
+  RUN_ROOT="$resume_root" \
+  HOST_MEMORY_MIB=65536 \
+  SLURM_STEP_GPUS=0 \
+  bash "$ROOT/scripts/run_experiment.sh" l40 --fresh)"
+assert_contains "$out" "resume_source=fresh run_timestamp=new"
+assert_not_contains "$out" "--run-timestamp"
 rm -rf "$resume_root"
 
 tmpbin="$(mktemp -d)"
-trap 'rm -rf "$tmpbin"' EXIT
 cat >"$tmpbin/nvidia-smi" <<'SH'
 #!/usr/bin/env bash
 case "$*" in

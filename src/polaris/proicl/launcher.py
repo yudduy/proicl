@@ -175,7 +175,7 @@ class _PlainProgress:
 
 
 def _make_progress(*, total: int, initial: int, desc: str):
-    if os.environ.get("PROICL_DISABLE_TQDM") == "1":
+    if os.environ.get("PROICL_DISABLE_TQDM", "1") == "1" or not sys.stderr.isatty():
         return _PlainProgress(total=total, initial=initial, desc=desc)
     try:
         from tqdm.auto import tqdm
@@ -268,11 +268,11 @@ def _format_active_cell_snapshot(status: dict[str, Any]) -> str:
 
 
 def _cell_heartbeat_interval_seconds() -> float:
-    raw = os.environ.get("PROICL_CELL_HEARTBEAT_SECONDS", "300")
+    raw = os.environ.get("PROICL_CELL_HEARTBEAT_SECONDS", "60")
     try:
         return max(0.0, float(raw))
     except ValueError:
-        return 300.0
+        return 60.0
 
 
 def source_hash(repo_root: Path) -> str:
