@@ -5,10 +5,14 @@ Run on the GPU machine:
 
 Use `bash scripts/run_experiment.sh h100`, `bash scripts/run_experiment.sh a100`, or `bash scripts/run_experiment.sh l40` only to force a profile. The script auto-detects assigned GPUs, resumes the latest incomplete matching run, emits active progress updates, caps safe concurrency, selects a compatible vLLM dtype, requires Python 3.11/3.12 for the pinned vLLM stack, logs W&B when `WANDB_API_KEY` is set, and prints `Result bundle: /absolute/path/results_bundle.tar.gz`.
 Force a new run with `bash scripts/run_experiment.sh --fresh`.
+Check the node and package resolver before using a reserved GPU with `bash scripts/run_experiment.sh --doctor`.
+Check a live/resumable run with `bash scripts/run_experiment.sh --status latest`.
 
 On Sherlock, use the Python module only and let the repo create its own vLLM environment:
-`ml python/3.12.1 && bash scripts/run_experiment.sh`
-Do not load Sherlock's central `py-vllm`, `py-pytorch`, or `py-transformers` modules for this experiment; their advertised versions do not match the pinned vLLM stack.
+`ml reset && ml python/3.12.1 && bash scripts/run_experiment.sh --doctor && bash scripts/run_experiment.sh`
+Do not load Sherlock's central `py-vllm`, `py-pytorch`, or `py-transformers` modules for this experiment; their advertised versions do not match the pinned vLLM stack. The repo pins the minimal eval resolver stack in `constraints/proicl-eval.txt` and fails fast if Linux binary wheels are unavailable.
+
+For a 12-hour H100 reservation, run `--doctor` first, start the normal command once it passes, and use `bash scripts/run_experiment.sh --status latest` from another shell to check PID, stderr growth, and checkpoint counts. If the reservation ends, rerun the same command; completed cells and completed problems are skipped.
 
 Fetch it from your local machine with:
 `mkdir -p results && scp <cluster>:/absolute/path/results_bundle.tar.gz ./results/`

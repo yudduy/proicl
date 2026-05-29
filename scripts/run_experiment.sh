@@ -17,7 +17,9 @@ Compatibility aliases:
 Useful overrides:
   EVAL_END=30 ROLLOUT_BUDGET=2 bash scripts/run_experiment.sh h100
   DRY_RUN=1 bash scripts/run_experiment.sh l40
-  ml python/3.12.1 && bash scripts/run_experiment.sh   # Sherlock
+  bash scripts/run_experiment.sh --doctor
+  bash scripts/run_experiment.sh --status latest
+  ml reset && ml python/3.12.1 && bash scripts/run_experiment.sh   # Sherlock
 
 Environment knobs:
   RUN_ROOT                 Output series directory. Default: runs/experiment
@@ -59,6 +61,8 @@ Environment knobs:
   VLLM_PARITY_ARTIFACT     Existing calibration_summary.json. If unset, calibration is run.
   SKIP_INSTALL=1           Reuse the current environment.
   INSTALL_PROFILE          standard or full. Default: standard.
+  CONSTRAINTS_FILE         pip constraints file. Default: constraints/proicl-eval.txt.
+  SKIP_BINARY_PREFLIGHT=1  Skip the Linux binary-wheel resolver preflight.
   REFLECTION_PROVIDER      xai or local-hf. Default: local-hf.
   WANDB_PROJECT            W&B project when WANDB_API_KEY is set. Default: proicl.
   SKIP_CALIBRATION=1       Require VLLM_PARITY_ARTIFACT instead of running calibration.
@@ -69,6 +73,8 @@ Environment knobs:
   PROICL_DISABLE_TQDM=0    Use tqdm progress bars instead of plain progress lines.
 
 Options:
+  --doctor                 Print cluster/package diagnostics, write cluster_probe.json, then exit.
+  --status [TARGET]        Print latest run/cell checkpoint status, then exit.
   --gpu-profile PROFILE    auto, l40, a100, h100, or generic.
   --resume [TARGET]        Resume auto, latest, a UTC timestamp, a run id, or a run directory.
                            Default: auto, which resumes the latest incomplete matching run.
@@ -82,12 +88,34 @@ EOF
 PROFILE_ARG=""
 RESUME_ARG="${RESUME:-auto}"
 FRESH_RUN=0
+DOCTOR_ONLY=0
+STATUS_ONLY=0
+STATUS_TARGET=""
 HEARTBEAT_ARG="${PROICL_CELL_HEARTBEAT_SECONDS:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help)
       usage
       exit 0
+      ;;
+    --doctor|doctor)
+      DOCTOR_ONLY=1
+      shift
+      ;;
+    --status=*)
+      STATUS_ONLY=1
+      STATUS_TARGET="${1#--status=}"
+      shift
+      ;;
+    --status|status)
+      STATUS_ONLY=1
+      if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
+        STATUS_TARGET="$2"
+        shift 2
+      else
+        STATUS_TARGET="latest"
+        shift
+      fi
       ;;
     auto|l40|a100|h100|generic)
       if [[ -n "$PROFILE_ARG" ]]; then
@@ -169,7 +197,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unexpected argument: $1" >&2
-      echo "Usage: bash scripts/run_experiment.sh [auto|l40|a100|h100|generic] [--fresh]" >&2
+      echo "Usage: bash scripts/run_experiment.sh [auto|l40|a100|h100|generic] [--doctor|--status|--fresh]" >&2
       exit 2
       ;;
   esac
@@ -184,6 +212,8 @@ INSTALL_PROFILE="${INSTALL_PROFILE:-standard}"
 SKIP_CALIBRATION="${SKIP_CALIBRATION:-0}"
 SKIP_SPS_MATH500_CALIBRATION="${SKIP_SPS_MATH500_CALIBRATION:-1}"
 SKIP_BACKEND_PREFLIGHT="${SKIP_BACKEND_PREFLIGHT:-1}"
+CONSTRAINTS_FILE="${CONSTRAINTS_FILE:-constraints/proicl-eval.txt}"
+SKIP_BINARY_PREFLIGHT="${SKIP_BINARY_PREFLIGHT:-0}"
 if [[ "${RUN_BACKEND_PREFLIGHT:-0}" == "1" ]]; then
   SKIP_BACKEND_PREFLIGHT=0
 fi
@@ -235,6 +265,20 @@ import sys
 version = sys.version_info[:2]
 raise SystemExit(0 if (3, 11) <= version < (3, 13) else 1)
 PY
+}
+python_has_pip() {
+  "$1" -m pip --version >/dev/null 2>&1
+}
+ensure_python_pip() {
+  local python_bin="$1"
+  if python_has_pip "$python_bin"; then
+    return 0
+  fi
+  if "$python_bin" -m ensurepip --upgrade >/dev/null 2>&1; then
+    python_has_pip "$python_bin"
+    return $?
+  fi
+  return 1
 }
 select_supported_python() {
   local candidate candidate_path
@@ -982,7 +1026,7 @@ else
   unset VLLM_ATTENTION_BACKEND
 fi
 
-if [[ "$DRY_RUN" != "1" ]]; then
+if [[ "$DRY_RUN" != "1" || "$DOCTOR_ONLY" == "1" ]]; then
   mkdir -p "$RUN_ROOT" "$CACHE_ROOT" "$HF_HOME" "$PIP_CACHE_DIR"
 fi
 
@@ -1129,6 +1173,11 @@ print_launch_summary() {
   echo "  calibration_dtype=$CALIBRATION_DTYPE"
   echo "  resume_source=$RESUME_SOURCE run_timestamp=${RUN_TIMESTAMP:-new}"
   echo "  progress_interval_seconds=${PROICL_CELL_HEARTBEAT_SECONDS:-60}"
+  local binary_preflight_enabled=1
+  if [[ "$SKIP_BINARY_PREFLIGHT" == "1" ]]; then
+    binary_preflight_enabled=0
+  fi
+  echo "  install_profile=$INSTALL_PROFILE constraints_file=$CONSTRAINTS_FILE binary_preflight=$binary_preflight_enabled"
   echo "  reflection_provider=$REFLECTION_PROVIDER"
   echo "  estimated_wall_clock_seconds_per_cell=$ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
 }
@@ -1150,7 +1199,7 @@ export PROICL_HOST_MEMORY_PER_CELL_MIB="$HOST_MEMORY_PER_CELL_MIB"
 export PROICL_PARALLELISM_STRATEGY="$PARALLELISM_STRATEGY"
 export PROICL_VLLM_GPU_MEMORY_UTILIZATION="$VLLM_GPU_MEMORY_UTILIZATION"
 export PROICL_VLLM_DTYPE="$VLLM_DTYPE"
-export PROICL_VLLM_ATTENTION_BACKEND="$VLLM_ATTENTION_BACKEND"
+export PROICL_VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-}"
 export PROICL_VLLM_PREFIX_CACHING="$VLLM_PREFIX_CACHING"
 export PROICL_CALIBRATION_DTYPE="$CALIBRATION_DTYPE"
 export PROICL_CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION="$CALIBRATION_VLLM_GPU_MEMORY_UTILIZATION"
@@ -1175,8 +1224,15 @@ export PROICL_SPS_ROLLOUTS_PER_CANDIDATE="$SPS_ROLLOUTS_PER_CANDIDATE"
 export PROICL_SPS_ROLLOUT_HORIZON="$SPS_ROLLOUT_HORIZON"
 export PROICL_SPS_CHAIN_BATCH_SIZE="$SPS_CHAIN_BATCH_SIZE"
 export PROICL_SPS_VLLM_BATCH_SIZE="$SPS_VLLM_BATCH_SIZE"
+export PROICL_INSTALL_PROFILE="$INSTALL_PROFILE"
+export PROICL_CONSTRAINTS_FILE="$CONSTRAINTS_FILE"
+export PROICL_SKIP_BINARY_PREFLIGHT="$SKIP_BINARY_PREFLIGHT"
+export PROICL_SKIP_INSTALL="$SKIP_INSTALL"
+export PROICL_VENV="$VENV"
 
-print_launch_summary
+if [[ "$STATUS_ONLY" != "1" ]]; then
+  print_launch_summary
+fi
 if [[ "$DRY_RUN" != "1" ]]; then
   write_launch_config "$RUN_ROOT/launch_config.json"
   write_resource_probe "$RUN_ROOT/resource_probe.json"
@@ -1196,6 +1252,489 @@ section() {
   echo "==> $*"
 }
 
+BINARY_PREFLIGHT_PACKAGES=(
+  "pyarrow==18.1.0"
+  "vllm==0.9.2"
+  "torch==2.7.0"
+  "xformers==0.0.30; platform_system == 'Linux' and platform_machine == 'x86_64'"
+  "libcst"
+)
+PIP_CONSTRAINT_ARGS=()
+if [[ -f "$CONSTRAINTS_FILE" ]]; then
+  PIP_CONSTRAINT_ARGS=(-c "$CONSTRAINTS_FILE")
+fi
+
+binary_wheel_preflight() {
+  local strict="${1:-1}"
+  if [[ "$SKIP_BINARY_PREFLIGHT" == "1" ]]; then
+    echo "Binary wheel preflight skipped by SKIP_BINARY_PREFLIGHT=1."
+    return 0
+  fi
+  if [[ "$(uname -s)" != "Linux" ]]; then
+    echo "Binary wheel preflight skipped on non-Linux host."
+    return 0
+  fi
+  if ! python_has_pip "$PY"; then
+    echo "Binary wheel preflight skipped: selected Python has no pip yet ($PY)." >&2
+    [[ "$strict" == "1" ]] && return 1 || return 0
+  fi
+  echo "Checking binary wheels for cluster-heavy packages."
+  printf '+ %q' "$PY"
+  printf ' %q' -m pip install --dry-run --only-binary=:all:
+  printf ' %q' "${PIP_CONSTRAINT_ARGS[@]}" "${BINARY_PREFLIGHT_PACKAGES[@]}"
+  printf '\n'
+  if "$PY" -m pip install --dry-run --only-binary=:all: \
+    "${PIP_CONSTRAINT_ARGS[@]}" "${BINARY_PREFLIGHT_PACKAGES[@]}"; then
+    return 0
+  fi
+  {
+    echo
+    echo "Binary wheel preflight failed."
+    echo "This usually means pip would try a source build for pyarrow, vLLM, torch, xformers, or libcst."
+    echo "Do not fix this by loading Sherlock py-vllm/py-pytorch/py-transformers or by compiling the stack."
+    echo "On Sherlock, use: ml reset && ml python/3.12.1"
+    echo "If torch/vLLM wheels still do not match this node's wheel tags or glibc, use the Modal/container path."
+  } >&2
+  return 1
+}
+
+write_cluster_probe() {
+  local out="$1"
+  local module_list=""
+  if command -v module >/dev/null 2>&1; then
+    module_list="$(module -t list 2>&1 || true)"
+  fi
+  PROICL_MODULE_LIST="$module_list" \
+  PROICL_NEED_CREATE_VENV="$NEED_CREATE_VENV" \
+  PROICL_BINARY_PREFLIGHT_PACKAGES="$(printf '%s\n' "${BINARY_PREFLIGHT_PACKAGES[@]}")" \
+  "$PY" - "$out" <<'PY'
+import json
+import os
+import platform
+import subprocess
+import sys
+from pathlib import Path
+
+out = Path(sys.argv[1])
+
+
+def run_text(cmd: list[str]) -> dict[str, object]:
+    try:
+        proc = subprocess.run(cmd, text=True, capture_output=True, timeout=15)
+    except Exception as exc:
+        return {"ok": False, "error": repr(exc)}
+    return {
+        "ok": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "stdout": proc.stdout.strip(),
+        "stderr": proc.stderr.strip(),
+    }
+
+
+def wheel_tags(limit: int = 12) -> list[str]:
+    try:
+        from packaging import tags
+    except Exception:
+        return []
+    return [str(tag) for _, tag in zip(range(limit), tags.sys_tags())]
+
+
+def int_env(name: str) -> int:
+    try:
+        return int(os.environ.get(name, "0"))
+    except ValueError:
+        return 0
+
+
+constraints_file = os.environ.get("PROICL_CONSTRAINTS_FILE", "")
+constraints_exists = bool(constraints_file) and Path(constraints_file).exists()
+payload = {
+    "schema": "proicl_cluster_probe.v1",
+    "python": {
+        "executable": sys.executable,
+        "version": sys.version.replace("\n", " "),
+        "version_info": list(sys.version_info[:3]),
+    },
+    "pip": run_text([sys.executable, "-m", "pip", "--version"]),
+    "platform": {
+        "system": platform.system(),
+        "machine": platform.machine(),
+        "platform": platform.platform(),
+        "libc": list(platform.libc_ver()),
+        "wheel_tags_head": wheel_tags(),
+    },
+    "modules": [
+        line.strip()
+        for line in os.environ.get("PROICL_MODULE_LIST", "").splitlines()
+        if line.strip()
+    ],
+    "gpu": {
+        "profile": os.environ.get("PROICL_GPU_PROFILE"),
+        "detection_source": os.environ.get("PROICL_GPU_DETECTION_SOURCE"),
+        "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "count": int_env("PROICL_GPU_COUNT"),
+        "names": os.environ.get("PROICL_GPU_NAMES", "unknown"),
+        "min_memory_mib": int_env("PROICL_GPU_MIN_MEMORY_MIB"),
+        "min_compute_cap_x10": int_env("PROICL_GPU_MIN_COMPUTE_CAP_X10"),
+        "vllm_dtype": os.environ.get("PROICL_VLLM_DTYPE"),
+    },
+    "resources": {
+        "host_memory_mib": int_env("PROICL_HOST_MEMORY_MIB"),
+        "num_shards": int_env("PROICL_NUM_SHARDS"),
+        "max_parallel_cells": int_env("PROICL_MAX_PARALLEL_CELLS"),
+        "smoke_max_parallel_cells": int_env("PROICL_SMOKE_MAX_PARALLEL_CELLS"),
+        "estimated_wall_clock_seconds_per_cell": int_env(
+            "PROICL_ESTIMATED_WALL_CLOCK_SECONDS_PER_CELL"
+        ),
+    },
+    "install_plan": {
+        "venv": os.environ.get("PROICL_VENV", ".venv-eval"),
+        "need_create_venv": os.environ.get("PROICL_NEED_CREATE_VENV") == "1",
+        "install_profile": os.environ.get("PROICL_INSTALL_PROFILE"),
+        "skip_install": os.environ.get("PROICL_SKIP_INSTALL") == "1",
+        "constraints_file": constraints_file,
+        "constraints_exists": constraints_exists,
+        "binary_preflight_enabled": os.environ.get("PROICL_SKIP_BINARY_PREFLIGHT") != "1",
+        "binary_preflight_packages": [
+            line
+            for line in os.environ.get("PROICL_BINARY_PREFLIGHT_PACKAGES", "").splitlines()
+            if line
+        ],
+    },
+    "nvidia_smi": run_text(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,name,compute_cap,memory.total,driver_version",
+            "--format=csv,noheader",
+        ]
+    ),
+}
+out.parent.mkdir(parents=True, exist_ok=True)
+out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
+print_doctor_summary() {
+  local probe="$1"
+  "$PY" - "$probe" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+probe = Path(sys.argv[1])
+payload = json.loads(probe.read_text(encoding="utf-8"))
+python = payload["python"]
+pip = payload["pip"]
+platform = payload["platform"]
+gpu = payload["gpu"]
+install = payload["install_plan"]
+tags = ", ".join(platform.get("wheel_tags_head") or ["unavailable"])
+modules = ", ".join(payload.get("modules") or ["none"])
+print("ProICL doctor:")
+print(f"  cluster_probe={probe}")
+print(f"  python={python['executable']} ({python['version_info'][0]}.{python['version_info'][1]}.{python['version_info'][2]})")
+print(f"  pip={pip.get('stdout') if pip.get('ok') else 'unavailable'}")
+print(f"  glibc={platform.get('libc')}")
+print(f"  top_wheel_tags={tags}")
+print(f"  modules={modules}")
+print(
+    "  gpu="
+    f"profile={gpu.get('profile')} count={gpu.get('count')} "
+    f"cc_min_x10={gpu.get('min_compute_cap_x10')} "
+    f"dtype={gpu.get('vllm_dtype')} names={gpu.get('names')}"
+)
+print(
+    "  install="
+    f"profile={install.get('install_profile')} "
+    f"constraints={install.get('constraints_file')} "
+    f"constraints_exists={install.get('constraints_exists')} "
+    f"binary_preflight={install.get('binary_preflight_enabled')}"
+)
+print("  sherlock_command=ml reset && ml python/3.12.1 && bash scripts/run_experiment.sh --doctor && bash scripts/run_experiment.sh")
+PY
+}
+
+print_run_status() {
+  local target="${1:-latest}"
+  "$PY" - "$RUN_ROOT" "$target" <<'PY'
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+root = Path(sys.argv[1])
+target = sys.argv[2] or "latest"
+stamp_re = re.compile(r"(\d{8}T\d{6}Z)")
+
+
+def load_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def jsonl_rows(path: Path) -> list[dict]:
+    rows = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        pass
+    return rows
+
+
+def count_lines(path: Path) -> int:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return sum(1 for line in handle if line.strip())
+    except OSError:
+        return 0
+
+
+def stamp_from(value: str) -> str | None:
+    match = stamp_re.search(value)
+    return match.group(1) if match else None
+
+
+def resolve_run() -> Path | None:
+    path = Path(target)
+    if path.exists():
+        return path.parent if path.name == "full" else path
+    if target not in {"", "auto", "latest"}:
+        stamp = stamp_from(target)
+        if stamp and root.exists():
+            matches = sorted(root.glob(f"proicl_*{stamp}*"))
+            if matches:
+                return matches[-1]
+        candidate = root / target
+        if candidate.exists():
+            return candidate.parent if candidate.name == "full" else candidate
+        return None
+    if not root.exists():
+        return None
+    candidates = [path for path in root.glob("proicl_*") if path.is_dir()]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item.stat().st_mtime)
+
+
+def age_text(ts: str | None) -> str:
+    if not ts:
+        return "unknown"
+    try:
+        dt = datetime.strptime(ts, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return "unknown"
+    delta = max(0, int((datetime.now(timezone.utc) - dt).total_seconds()))
+    if delta < 90:
+        return f"{delta}s"
+    if delta < 5400:
+        return f"{delta // 60}m"
+    return f"{delta // 3600}h{(delta % 3600) // 60}m"
+
+
+def pid_alive(pid: object) -> str:
+    try:
+        pid_int = int(pid)
+    except Exception:
+        return "unknown"
+    try:
+        os.kill(pid_int, 0)
+    except ProcessLookupError:
+        return "no"
+    except PermissionError:
+        return "yes"
+    return "yes"
+
+
+def artifact_status(path: Path) -> dict:
+    checkpoint = load_json(path / "checkpoint.json")
+    stderr = path / "stderr.log"
+    try:
+        stderr_bytes = stderr.stat().st_size
+        stderr_mtime = datetime.fromtimestamp(stderr.stat().st_mtime, timezone.utc)
+        stderr_age = max(0, int((datetime.now(timezone.utc) - stderr_mtime).total_seconds()))
+    except OSError:
+        stderr_bytes = 0
+        stderr_age = None
+    return {
+        "artifact_dir": str(path),
+        "metrics": (path / "metrics.json").exists(),
+        "selected_rows": count_lines(path / "selected.jsonl"),
+        "completed_problems": checkpoint.get("completed_problems"),
+        "expected_problems": checkpoint.get("expected_problems"),
+        "checkpoint_complete": checkpoint.get("complete"),
+        "stderr_log": str(stderr),
+        "stderr_bytes": stderr_bytes,
+        "stderr_age_seconds": stderr_age,
+    }
+
+
+run_dir = resolve_run()
+if run_dir is None:
+    print(f"No ProICL runs found for target={target!r} under {root}")
+    raise SystemExit(0)
+full = run_dir / "full" if (run_dir / "full").exists() else run_dir
+events_path = full / "events.jsonl"
+events = jsonl_rows(events_path)
+states: dict[tuple[str, str, int], dict] = {}
+
+
+def event_key(row: dict) -> tuple[str, str, int] | None:
+    if row.get("track") is None or row.get("condition") is None or row.get("shard") is None:
+        return None
+    try:
+        shard = int(row["shard"])
+    except Exception:
+        return None
+    return (str(row["track"]), str(row["condition"]), shard)
+
+
+for row in events:
+    key = event_key(row)
+    if key is None:
+        continue
+    state = states.setdefault(key, {"track": key[0], "condition": key[1], "shard": key[2]})
+    event = row.get("event")
+    state["last_event"] = event
+    state["last_ts"] = row.get("ts")
+    if event in {"cell_start", "cell_heartbeat"}:
+        state["status"] = "active"
+        for field in ("gpu", "pid", "artifact_dir", "stderr_log", "stderr_bytes", "elapsed_seconds"):
+            if field in row:
+                state[field] = row[field]
+    elif event == "cell_done":
+        state["status"] = "complete"
+    elif event == "cell_failed":
+        state["status"] = "failed"
+        state["returncode"] = row.get("returncode")
+        if row.get("artifact_dir"):
+            state["artifact_dir"] = row["artifact_dir"]
+
+runs_root = full / "runs"
+if runs_root.exists():
+    for artifact in sorted(runs_root.glob("*/*/shard-*")):
+        if not artifact.is_dir():
+            continue
+        try:
+            rel = artifact.relative_to(runs_root).parts
+            track, condition, shard_name = rel[0], rel[1], rel[2]
+            shard = int(shard_name.split("-", 1)[1])
+        except Exception:
+            continue
+        key = (track, condition, shard)
+        state = states.setdefault(key, {"track": track, "condition": condition, "shard": shard})
+        state.setdefault("artifact_dir", str(artifact))
+
+for state in states.values():
+    artifact = Path(state["artifact_dir"]) if state.get("artifact_dir") else None
+    if artifact is None:
+        artifact = runs_root / state["track"] / state["condition"] / f"shard-{state['shard']}"
+        state["artifact_dir"] = str(artifact)
+    state.update(artifact_status(artifact))
+    if state["metrics"] and state.get("status") not in {"failed", "active"}:
+        state["status"] = "complete"
+    state.setdefault("status", "observed")
+
+queue_events = [row for row in events if row.get("event") == "queue_start"]
+planned = int(queue_events[-1].get("cells", 0)) if queue_events else len(states)
+complete = sum(1 for state in states.values() if state.get("status") == "complete")
+failed = sum(1 for state in states.values() if state.get("status") == "failed")
+active_candidates = [state for state in states.values() if state.get("status") == "active"]
+active_states = [state for state in active_candidates if pid_alive(state.get("pid")) != "no"]
+stale_states = [state for state in active_candidates if pid_alive(state.get("pid")) == "no"]
+last_event = events[-1] if events else {}
+
+print(f"ProICL status: {run_dir}")
+print(f"  full_root={full}")
+print(f"  events={events_path if events_path.exists() else 'missing'} rows={len(events)}")
+print(
+    f"  cells planned={planned} observed={len(states)} complete={complete} "
+    f"failed={failed} active={len(active_states)} stale={len(stale_states)}"
+)
+if last_event:
+    print(
+        f"  last_event={last_event.get('event')} ts={last_event.get('ts')} "
+        f"age={age_text(last_event.get('ts'))}"
+    )
+if active_states:
+    print("  active:")
+    for state in sorted(active_states, key=lambda item: (item["track"], item["condition"], item["shard"])):
+        completed = state.get("completed_problems")
+        expected = state.get("expected_problems")
+        checkpoint = (
+            f"checkpoint={completed}/{expected}"
+            if completed is not None and expected is not None
+            else f"selected_rows={state.get('selected_rows', 0)}"
+        )
+        stderr_age = state.get("stderr_age_seconds")
+        stderr_age_text = "unknown" if stderr_age is None else f"{stderr_age}s"
+        print(
+            "    "
+            f"gpu={state.get('gpu', '?')} pid={state.get('pid', '?')} "
+            f"alive={pid_alive(state.get('pid'))} "
+            f"{state['track']}/{state['condition']}/shard-{state['shard']} "
+            f"{checkpoint} stderr_bytes={state.get('stderr_bytes', 0)} "
+            f"stderr_age={stderr_age_text} heartbeat_age={age_text(state.get('last_ts'))} "
+            f"log={state.get('stderr_log')}"
+        )
+else:
+    print("  active: none")
+if stale_states:
+    print("  stale:")
+    for state in sorted(stale_states, key=lambda item: (item["track"], item["condition"], item["shard"])):
+        print(
+            "    "
+            f"pid={state.get('pid', '?')} "
+            f"{state['track']}/{state['condition']}/shard-{state['shard']} "
+            f"last_event_age={age_text(state.get('last_ts'))} "
+            f"log={state.get('stderr_log')}"
+        )
+
+try:
+    gpu_proc = subprocess.run(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,name,utilization.gpu,memory.used,memory.total",
+            "--format=csv,noheader,nounits",
+        ],
+        text=True,
+        capture_output=True,
+        timeout=10,
+    )
+except Exception:
+    gpu_proc = None
+if gpu_proc and gpu_proc.returncode == 0 and gpu_proc.stdout.strip():
+    print("  gpu_snapshot:")
+    for line in gpu_proc.stdout.strip().splitlines()[:8]:
+        print(f"    {line.strip()}")
+PY
+}
+
+if [[ "$STATUS_ONLY" == "1" ]]; then
+  print_run_status "${STATUS_TARGET:-latest}"
+  exit 0
+fi
+
+if [[ "$DOCTOR_ONLY" == "1" ]]; then
+  CLUSTER_PROBE="$RUN_ROOT/cluster_probe.json"
+  write_cluster_probe "$CLUSTER_PROBE"
+  print_doctor_summary "$CLUSTER_PROBE"
+  binary_wheel_preflight 0
+  exit 0
+fi
+
 if [[ "$DRY_RUN" != "1" && ! -f pyproject.toml ]]; then
   echo "Run this script from the ProICL repository root." >&2
   exit 1
@@ -1210,17 +1749,22 @@ if [[ "$DRY_RUN" != "1" && "$SKIP_INSTALL" != "1" ]]; then
     run_cmd "$PY" -m venv "$VENV"
     PY="$VENV_PY"
   fi
+  if ! ensure_python_pip "$PY"; then
+    echo "Selected Python has no pip and ensurepip failed: $PY" >&2
+    echo "On Sherlock, run: ml reset && ml python/3.12.1" >&2
+    exit 1
+  fi
   run_cmd "$PY" -m pip install -U pip wheel setuptools
+  binary_wheel_preflight 1
   case "$INSTALL_PROFILE" in
     standard|light)
-      run_cmd "$PY" -m pip install -r requirements.txt
+      run_cmd "$PY" -m pip install "${PIP_CONSTRAINT_ARGS[@]}" -r requirements.txt
       if [[ "$REFLECTION_PROVIDER" == "xai" ]]; then
-        run_cmd "$PY" -m pip install -e ".[gepa_reflection]"
+        run_cmd "$PY" -m pip install "${PIP_CONSTRAINT_ARGS[@]}" -e ".[gepa_reflection]"
       fi
       ;;
     full)
-      run_cmd "$PY" -m pip install -e ".[code,dc,gepa_reflection]"
-      run_cmd "$PY" -m pip install "vllm==0.9.2"
+      run_cmd "$PY" -m pip install "${PIP_CONSTRAINT_ARGS[@]}" -e ".[code,dc,gepa_reflection]" "vllm==0.9.2"
       ;;
     *)
       echo "INSTALL_PROFILE must be standard or full; got $INSTALL_PROFILE" >&2

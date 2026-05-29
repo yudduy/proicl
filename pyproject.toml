@@ -5,11 +5,11 @@ description = "ProICL: inference-time composition for RL-style reasoning gains (
 requires-python = ">=3.11,<3.13"
 dependencies = [
   "accelerate",
-  "datasets",
+  "datasets==4.0.0",
   "huggingface-hub>=0.33.0,<1.0",
   "numpy>=1.26,<2.3",
-  "pandas",
-  "pyarrow",
+  "pandas>=2.2,<3",
+  "pyarrow==18.1.0",
   "pylatexenc",
   "reasoning-gym==0.1.25",
   "scipy",

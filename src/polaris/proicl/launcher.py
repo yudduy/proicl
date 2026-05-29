@@ -723,15 +723,6 @@ def run_cells(
                 env.setdefault("TOKENIZERS_PARALLELISM", "false")
                 env.setdefault("PYTHONDONTWRITEBYTECODE", "1")
                 env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-                append_event(
-                    events_path,
-                    "cell_start",
-                    gpu=gpu,
-                    track=cell.track,
-                    condition=cell.proicl_condition,
-                    shard=cell.shard_id,
-                    mode=launch_mode,
-                )
                 progress.set_postfix_str(
                     f"gpu={gpu} {launch_mode} "
                     f"{cell.track}/{cell.proicl_condition}/shard-{cell.shard_id}",
@@ -748,6 +739,18 @@ def run_cells(
                 proc = subprocess.Popen(cmd, cwd=repo_root, env=env, stdout=stdout, stderr=stderr)
                 stdout.close()
                 stderr.close()
+                append_event(
+                    events_path,
+                    "cell_start",
+                    gpu=gpu,
+                    pid=getattr(proc, "pid", None),
+                    track=cell.track,
+                    condition=cell.proicl_condition,
+                    shard=cell.shard_id,
+                    mode=launch_mode,
+                    artifact_dir=cell.artifact_dir,
+                    stderr_log=str(out / "stderr.log"),
+                )
                 active.append(
                     _ActiveCell(
                         proc=proc,

@@ -42,6 +42,52 @@ common_env=(
   GPU_NAMES="NVIDIA L40S"
 )
 
+doctor_root="$(mktemp -d)"
+out="$(run_case doctor-h100 \
+  DRY_RUN=1 \
+  SKIP_INSTALL=1 \
+  RUN_ROOT="$doctor_root" \
+  HOST_MEMORY_MIB=131072 \
+  GPU_MEMORY_MIB=81559 \
+  GPU_COMPUTE_CAP=9.0 \
+  GPU_NAMES="NVIDIA H100 80GB HBM3" \
+  SLURM_STEP_GPUS=0 \
+  bash "$ROOT/scripts/run_experiment.sh" h100 --doctor)"
+assert_contains "$out" "ProICL doctor:"
+assert_contains "$out" "constraints=constraints/proicl-eval.txt"
+test -f "$doctor_root/cluster_probe.json"
+rm -rf "$doctor_root"
+
+status_empty_root="$(mktemp -d)"
+out="$(run_case status-empty \
+  DRY_RUN=1 \
+  SKIP_INSTALL=1 \
+  RUN_ROOT="$status_empty_root" \
+  bash "$ROOT/scripts/run_experiment.sh" --status latest)"
+assert_contains "$out" "No ProICL runs found"
+assert_not_contains "$out" "ProICL launch profile:"
+rm -rf "$status_empty_root"
+
+status_root="$(mktemp -d)"
+status_run="$status_root/proicl_small-real-slice_custom-4t_cross-family-curriculum_vllm_heldout_20260529T120000Z"
+status_cell="$status_run/full/runs/reasoning_gym_boxnet/sps_only/shard-0"
+mkdir -p "$status_cell"
+printf '%s\n' \
+  '{"event":"queue_start","ts":"20260529T120000Z","cells":1,"pending":1,"skipped":0}' \
+  '{"artifact_dir":"'"$status_cell"'","condition":"sps_only","event":"cell_start","gpu":"0","pid":'"$$"',"shard":0,"stderr_log":"'"$status_cell"'/stderr.log","track":"reasoning_gym_boxnet","ts":"20260529T120001Z"}' \
+  > "$status_run/full/events.jsonl"
+printf '{"complete":false,"completed_problems":1,"expected_problems":2}\n' > "$status_cell/checkpoint.json"
+printf '{"problem_id":"p0"}\n' > "$status_cell/selected.jsonl"
+printf 'working\n' > "$status_cell/stderr.log"
+out="$(run_case status-active \
+  DRY_RUN=1 \
+  SKIP_INSTALL=1 \
+  RUN_ROOT="$status_root" \
+  bash "$ROOT/scripts/run_experiment.sh" --status latest)"
+assert_contains "$out" "cells planned=1 observed=1 complete=0 failed=0 active=1 stale=0"
+assert_contains "$out" "checkpoint=1/2"
+rm -rf "$status_root"
+
 out="$(run_case l40-one \
   "${common_env[@]}" \
   HOST_MEMORY_MIB=65536 \
