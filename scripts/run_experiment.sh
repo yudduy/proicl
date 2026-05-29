@@ -17,6 +17,7 @@ Compatibility aliases:
 Useful overrides:
   EVAL_END=30 ROLLOUT_BUDGET=2 bash scripts/run_experiment.sh h100
   DRY_RUN=1 bash scripts/run_experiment.sh l40
+  ml python/3.12.1 && bash scripts/run_experiment.sh   # Sherlock
 
 Environment knobs:
   RUN_ROOT                 Output series directory. Default: runs/experiment
@@ -235,31 +236,56 @@ version = sys.version_info[:2]
 raise SystemExit(0 if (3, 11) <= version < (3, 13) else 1)
 PY
 }
+select_supported_python() {
+  local candidate candidate_path
+  for candidate in python3.12 python3.11 python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      candidate_path="$(command -v "$candidate")"
+      if python_is_supported "$candidate_path"; then
+        printf '%s\n' "$candidate_path"
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+try_load_sherlock_python_module() {
+  if ! command -v module >/dev/null 2>&1; then
+    if [[ -f /etc/profile.d/modules.sh ]]; then
+      # shellcheck disable=SC1091
+      source /etc/profile.d/modules.sh
+    elif [[ -f /usr/share/lmod/lmod/init/bash ]]; then
+      # shellcheck disable=SC1091
+      source /usr/share/lmod/lmod/init/bash
+    fi
+  fi
+  if command -v module >/dev/null 2>&1; then
+    module load python/3.12.1 >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
 if [[ -n "${PYTHON:-}" ]]; then
   PY="$PYTHON"
 elif [[ -x "$VENV_PY" ]]; then
   PY="$VENV_PY"
 else
   NEED_CREATE_VENV=1
-  PY=""
-  for candidate in python3.12 python3.11 python3 python; do
-    if command -v "$candidate" >/dev/null 2>&1; then
-      candidate_path="$(command -v "$candidate")"
-      if python_is_supported "$candidate_path"; then
-        PY="$candidate_path"
-        break
-      fi
-    fi
-  done
+  PY="$(select_supported_python || true)"
+  if [[ -z "$PY" ]]; then
+    try_load_sherlock_python_module || true
+    PY="$(select_supported_python || true)"
+  fi
   if [[ -z "$PY" ]]; then
     echo "ProICL requires Python 3.11 or 3.12 because vLLM 0.9.2 does not publish Python 3.13+ wheels." >&2
-    echo "Create $VENV with Python 3.11/3.12 or set PYTHON to a supported interpreter." >&2
+    echo "On Sherlock, run: ml python/3.12.1" >&2
+    echo "Then re-run this script, or set PYTHON to a supported interpreter." >&2
     exit 1
   fi
 fi
 if ! python_is_supported "$PY"; then
   echo "ProICL requires Python 3.11 or 3.12 because vLLM 0.9.2 does not publish Python 3.13+ wheels; selected interpreter failed: $PY" >&2
-  echo "Create $VENV with Python 3.11/3.12 or set PYTHON to a supported interpreter." >&2
+  echo "On Sherlock, run: ml python/3.12.1" >&2
+  echo "Then re-run this script, or set PYTHON to a supported interpreter." >&2
   exit 1
 fi
 
