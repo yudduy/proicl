@@ -491,6 +491,7 @@ def _start_gepa_archive(
     args: argparse.Namespace,
     env: dict[str, str],
     root: Path,
+    events: Path,
     tracks: list[str],
     dev_split: tuple[int, int],
     archive_size: int,
@@ -516,11 +517,16 @@ def _start_gepa_archive(
         )
         and not force
     ):
+        from polaris.proicl.launcher import append_event
+
+        append_event(events, "gepa_archive_reuse", archive_dir=str(out))
         return None
     log_dir = root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    stdout = (log_dir / f"build_gepa_k{archive_size}.stdout.json").open("w", encoding="utf-8")
-    stderr = (log_dir / f"build_gepa_k{archive_size}.stderr.log").open("w", encoding="utf-8")
+    stdout_path = log_dir / f"build_gepa_k{archive_size}.stdout.json"
+    stderr_path = log_dir / f"build_gepa_k{archive_size}.stderr.log"
+    stdout = stdout_path.open("w", encoding="utf-8")
+    stderr = stderr_path.open("w", encoding="utf-8")
     cmd = _gepa_archive_command(
         args=args,
         out=out,
@@ -540,6 +546,17 @@ def _start_gepa_archive(
     proc = subprocess.Popen(cmd, cwd=REPO_ROOT, env=env, stdout=stdout, stderr=stderr)
     stdout.close()
     stderr.close()
+    from polaris.proicl.launcher import append_event
+
+    append_event(
+        events,
+        "gepa_archive_start",
+        gpu=cuda_visible_devices,
+        pid=getattr(proc, "pid", None),
+        archive_dir=str(out),
+        stdout_log=str(stdout_path),
+        stderr_log=str(stderr_path),
+    )
     return proc
 
 
@@ -565,7 +582,11 @@ def _wait_for_gepa_archive(
             return int(rc)
         now = time.monotonic()
         if now >= next_heartbeat:
-            append_payload = {"gpu": gpu, "elapsed_seconds": elapsed}
+            append_payload = {
+                "gpu": gpu,
+                "pid": getattr(proc, "pid", None),
+                "elapsed_seconds": elapsed,
+            }
             from polaris.proicl.launcher import append_event
 
             append_event(events, "gepa_archive_heartbeat", **append_payload)
@@ -861,47 +882,77 @@ def main() -> None:
             worker_cells=len(partitioned_all_cells),
         )
 
-    gepa_gpu = gpus[0]
-    worker_gpus = worker_pool_gpus
-    if args.overlap_gepa_and_cells and len(gpus) > 1:
-        worker_gpus = gpus[1 : 1 + max_parallel_cells]
-    gepa_proc = _start_gepa_archive(
-        args=args,
-        env=env,
-        root=full_root,
-        tracks=args.archive_train_tracks or args.tracks,
-        dev_split=tuple(args.gepa_dev_split),
-        archive_size=args.archive_size,
-        max_metric_calls=args.max_metric_calls,
-        sampler_max_new_tokens=args.max_new_tokens,
-        reflection_max_new_tokens=512,
-        cuda_visible_devices=gepa_gpu,
-        force=args.force_gepa,
-    )
     direct_cells = [cell for cell in partitioned_all_cells if not cell.uses_gepa_archive and not cell.uses_memory]
     dependent_cells = [cell for cell in partitioned_all_cells if cell.uses_gepa_archive or cell.uses_memory]
-    if gepa_proc is not None and args.overlap_gepa_and_cells and len(gpus) > 1:
-        append_event(events, "overlap_direct_cells_start", gepa_gpu=gepa_gpu, worker_gpus=worker_gpus)
-        _run_cell_list(
-            args=args,
-            env=env,
-            cells=direct_cells,
-            gpus=worker_gpus,
-            events=events,
-            root=full_root,
-            tracks=args.tracks,
-            run_stage=args.run_stage,
-        )
-    rc = _wait_for_gepa_archive(gepa_proc, events=events, gpu=gepa_gpu)
-    if rc != 0:
-        append_event(events, "gepa_archive_failed", returncode=rc)
-        raise RuntimeError(f"GEPA archive build failed with return code {rc}")
-    append_event(events, "gepa_archive_ready", gpu=gepa_gpu)
-    remaining_cells = (
-        dependent_cells
-        if gepa_proc is not None and args.overlap_gepa_and_cells and len(gpus) > 1
-        else partitioned_all_cells
-    )
+    remaining_cells = partitioned_all_cells
+    if dependent_cells:
+        gepa_gpu = gpus[0]
+        worker_gpus = worker_pool_gpus
+        gepa_proc = None
+        if args.overlap_gepa_and_cells and len(gpus) > 1:
+            worker_gpus = gpus[1 : 1 + max_parallel_cells]
+            gepa_proc = _start_gepa_archive(
+                args=args,
+                env=env,
+                root=full_root,
+                events=events,
+                tracks=args.archive_train_tracks or args.tracks,
+                dev_split=tuple(args.gepa_dev_split),
+                archive_size=args.archive_size,
+                max_metric_calls=args.max_metric_calls,
+                sampler_max_new_tokens=args.max_new_tokens,
+                reflection_max_new_tokens=512,
+                cuda_visible_devices=gepa_gpu,
+                force=args.force_gepa,
+            )
+            if gepa_proc is not None:
+                append_event(events, "overlap_direct_cells_start", gepa_gpu=gepa_gpu, worker_gpus=worker_gpus)
+                _run_cell_list(
+                    args=args,
+                    env=env,
+                    cells=direct_cells,
+                    gpus=worker_gpus,
+                    events=events,
+                    root=full_root,
+                    tracks=args.tracks,
+                    run_stage=args.run_stage,
+                )
+                remaining_cells = dependent_cells
+        else:
+            if direct_cells:
+                append_event(events, "direct_cells_before_gepa_start", cells=len(direct_cells), gpu_pool=worker_pool_gpus)
+                _run_cell_list(
+                    args=args,
+                    env=env,
+                    cells=direct_cells,
+                    gpus=worker_pool_gpus,
+                    events=events,
+                    root=full_root,
+                    tracks=args.tracks,
+                    run_stage=args.run_stage,
+                )
+            gepa_proc = _start_gepa_archive(
+                args=args,
+                env=env,
+                root=full_root,
+                events=events,
+                tracks=args.archive_train_tracks or args.tracks,
+                dev_split=tuple(args.gepa_dev_split),
+                archive_size=args.archive_size,
+                max_metric_calls=args.max_metric_calls,
+                sampler_max_new_tokens=args.max_new_tokens,
+                reflection_max_new_tokens=512,
+                cuda_visible_devices=gepa_gpu,
+                force=args.force_gepa,
+            )
+            remaining_cells = dependent_cells
+        rc = _wait_for_gepa_archive(gepa_proc, events=events, gpu=gepa_gpu)
+        if rc != 0:
+            append_event(events, "gepa_archive_failed", returncode=rc)
+            raise RuntimeError(f"GEPA archive build failed with return code {rc}")
+        append_event(events, "gepa_archive_ready", gpu=gepa_gpu)
+    else:
+        append_event(events, "gepa_archive_skipped", reason="no_dependent_cells")
     _run_cell_list(
         args=args,
         env=env,

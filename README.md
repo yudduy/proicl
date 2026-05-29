@@ -12,7 +12,7 @@ On Sherlock, use the Python module only and let the repo create its own vLLM env
 `ml reset && ml python/3.12.1 && bash scripts/run_experiment.sh --doctor && bash scripts/run_experiment.sh`
 Do not load Sherlock's central `py-vllm`, `py-pytorch`, or `py-transformers` modules for this experiment; their advertised versions do not match the pinned vLLM stack. The repo pins the minimal eval resolver stack in `constraints/proicl-eval.txt` and fails fast if Linux binary wheels are unavailable.
 
-For a 12-hour H100 reservation, run `--doctor` first, start the normal command once it passes, and use `bash scripts/run_experiment.sh --status latest` from another shell to check PID, stderr growth, and checkpoint counts. If the reservation ends, rerun the same command; completed cells and completed problems are skipped.
+For a 12-hour H100 reservation, run `--doctor` first, start the normal command once it passes, and use `bash scripts/run_experiment.sh --status latest` from another shell to check PID, stderr growth, GEPA archive state, and checkpoint counts. On a single GPU, non-GEPA cells run before the GEPA archive build so the run makes useful resumable progress before the longest GEPA step. If the reservation ends, rerun the same command; completed cells and completed problems are skipped.
 
 Fetch it from your local machine with:
 `mkdir -p results && scp <cluster>:/absolute/path/results_bundle.tar.gz ./results/`

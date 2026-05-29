@@ -1655,6 +1655,50 @@ active_candidates = [state for state in states.values() if state.get("status") =
 active_states = [state for state in active_candidates if pid_alive(state.get("pid")) != "no"]
 stale_states = [state for state in active_candidates if pid_alive(state.get("pid")) == "no"]
 last_event = events[-1] if events else {}
+gepa_state: dict = {}
+for row in events:
+    event = row.get("event")
+    if event not in {
+        "gepa_archive_start",
+        "gepa_archive_heartbeat",
+        "gepa_archive_ready",
+        "gepa_archive_failed",
+        "gepa_archive_reuse",
+        "gepa_archive_skipped",
+    }:
+        continue
+    gepa_state["last_event"] = event
+    gepa_state["last_ts"] = row.get("ts")
+    if event in {"gepa_archive_start", "gepa_archive_heartbeat"}:
+        gepa_state["status"] = "active"
+        for field in (
+            "gpu",
+            "pid",
+            "archive_dir",
+            "stdout_log",
+            "stderr_log",
+            "elapsed_seconds",
+        ):
+            if field in row:
+                gepa_state[field] = row[field]
+    elif event == "gepa_archive_ready":
+        gepa_state["status"] = "ready"
+        if "gpu" in row:
+            gepa_state["gpu"] = row["gpu"]
+    elif event == "gepa_archive_failed":
+        gepa_state["status"] = "failed"
+        gepa_state["returncode"] = row.get("returncode")
+    elif event == "gepa_archive_reuse":
+        gepa_state["status"] = "ready"
+        if "archive_dir" in row:
+            gepa_state["archive_dir"] = row["archive_dir"]
+    elif event == "gepa_archive_skipped":
+        gepa_state["status"] = "skipped"
+        gepa_state["reason"] = row.get("reason")
+
+if gepa_state.get("status") == "active" and pid_alive(gepa_state.get("pid")) == "no":
+    gepa_state["status"] = "stale"
+
 
 print(f"ProICL status: {run_dir}")
 print(f"  full_root={full}")
@@ -1667,6 +1711,29 @@ if last_event:
     print(
         f"  last_event={last_event.get('event')} ts={last_event.get('ts')} "
         f"age={age_text(last_event.get('ts'))}"
+    )
+if gepa_state:
+    stderr_log = gepa_state.get("stderr_log")
+    stderr_bytes = 0
+    stderr_age_text = "unknown"
+    if stderr_log:
+        try:
+            stderr_path = Path(stderr_log)
+            stat = stderr_path.stat()
+            stderr_bytes = stat.st_size
+            stderr_mtime = datetime.fromtimestamp(stat.st_mtime, timezone.utc)
+            stderr_age = max(0, int((datetime.now(timezone.utc) - stderr_mtime).total_seconds()))
+            stderr_age_text = f"{stderr_age}s"
+        except OSError:
+            pass
+    print(
+        "  gepa_archive="
+        f"status={gepa_state.get('status')} gpu={gepa_state.get('gpu', '?')} "
+        f"pid={gepa_state.get('pid', '?')} alive={pid_alive(gepa_state.get('pid'))} "
+        f"elapsed={gepa_state.get('elapsed_seconds', '?')}s "
+        f"heartbeat_age={age_text(gepa_state.get('last_ts'))} "
+        f"stderr_bytes={stderr_bytes} stderr_age={stderr_age_text} "
+        f"log={stderr_log or 'unknown'}"
     )
 if active_states:
     print("  active:")

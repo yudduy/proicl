@@ -72,8 +72,11 @@ status_root="$(mktemp -d)"
 status_run="$status_root/proicl_small-real-slice_custom-4t_cross-family-curriculum_vllm_heldout_20260529T120000Z"
 status_cell="$status_run/full/runs/reasoning_gym_boxnet/sps_only/shard-0"
 mkdir -p "$status_cell"
+printf 'gepa running\n' > "$status_run/full/logs_gepa.tmp"
 printf '%s\n' \
   '{"event":"queue_start","ts":"20260529T120000Z","cells":1,"pending":1,"skipped":0}' \
+  '{"archive_dir":"'"$status_run"'/full/archives/proicl_cross_family_curriculum_test","event":"gepa_archive_start","gpu":"0","pid":'"$$"',"stderr_log":"'"$status_run"'/full/logs_gepa.tmp","ts":"20260529T120000Z"}' \
+  '{"elapsed_seconds":60,"event":"gepa_archive_heartbeat","gpu":"0","pid":'"$$"',"ts":"20260529T120100Z"}' \
   '{"artifact_dir":"'"$status_cell"'","condition":"sps_only","event":"cell_start","gpu":"0","pid":'"$$"',"shard":0,"stderr_log":"'"$status_cell"'/stderr.log","track":"reasoning_gym_boxnet","ts":"20260529T120001Z"}' \
   > "$status_run/full/events.jsonl"
 printf '{"complete":false,"completed_problems":1,"expected_problems":2}\n' > "$status_cell/checkpoint.json"
@@ -85,6 +88,7 @@ out="$(run_case status-active \
   RUN_ROOT="$status_root" \
   bash "$ROOT/scripts/run_experiment.sh" --status latest)"
 assert_contains "$out" "cells planned=1 observed=1 complete=0 failed=0 active=1 stale=0"
+assert_contains "$out" "gepa_archive=status=active"
 assert_contains "$out" "checkpoint=1/2"
 rm -rf "$status_root"
 
