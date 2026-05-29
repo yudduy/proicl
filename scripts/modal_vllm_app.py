@@ -30,7 +30,7 @@ vllm_image = (
     .entrypoint([])
     .run_commands(
         "ln -sf $(command -v python3) /usr/local/bin/python",
-        "python -m pip install hf-transfer==0.1.8 'huggingface-hub[hf_xet]' datasets pandas pylatexenc sympy reasoning-gym==0.1.25",
+        "python -m pip install hf-transfer==0.1.8 'huggingface-hub[hf_xet]>=0.33.0,<1.0' 'numpy>=1.26,<2.3' datasets pandas pylatexenc sympy reasoning-gym==0.1.25",
     )
     .env(
         {

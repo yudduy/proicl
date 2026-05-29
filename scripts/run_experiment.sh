@@ -63,6 +63,7 @@ Environment knobs:
   SKIP_CALIBRATION=1       Require VLLM_PARITY_ARTIFACT instead of running calibration.
   SKIP_SPS_MATH500_CALIBRATION=0 Run the slow SPS-vs-MCMC MATH500 gate. Default: skipped.
   PYTHON                   Explicit Python 3.11/3.12 interpreter. Overrides VENV auto-detection.
+  PROICL_CELL_HEARTBEAT_SECONDS Active-cell heartbeat interval. Default: 300; 0 disables.
   SMOKE_ONLY=1             Developer-only: run only the harness smoke.
   INCLUDE_CANDIDATES=1     Include candidates.jsonl in the final bundle.
   PROICL_DISABLE_TQDM=1    Use plain progress lines instead of tqdm.

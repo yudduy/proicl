@@ -522,6 +522,49 @@ def test_proicl_launcher_resumes_matching_partial_cell(tmp_path, monkeypatch):
     assert partial.exists()
 
 
+def test_proicl_launcher_active_cell_snapshot_reports_checkpoint_progress(tmp_path):
+    cell = build_signal_cells(
+        root=tmp_path / "proicl",
+        tracks=("reasoning_gym_boxnet",),
+        split=(20, 22),
+        rollout_budget=2,
+        num_shards=1,
+        memory_num_shards=1,
+    )[0]
+    out = Path(cell.artifact_dir)
+    out.mkdir(parents=True)
+    (out / "selected.jsonl").write_text('{"problem_id": "p1"}\n', encoding="utf-8")
+    (out / "checkpoint.json").write_text(
+        json.dumps(
+            {
+                "completed_problems": 1,
+                "expected_problems": 2,
+                "complete": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (out / "stderr.log").write_text("still running\n", encoding="utf-8")
+    active = launcher_mod._ActiveCell(
+        proc=SimpleNamespace(pid=1234),
+        cell=cell,
+        gpu="2",
+        started_at=10.0,
+    )
+
+    snapshot = launcher_mod._active_cell_snapshot(active, now=75.5)
+    text = launcher_mod._format_active_cell_snapshot(snapshot)
+
+    assert snapshot["pid"] == 1234
+    assert snapshot["gpu"] == "2"
+    assert snapshot["elapsed_seconds"] == 65.5
+    assert snapshot["completed_problems"] == 1
+    assert snapshot["expected_problems"] == 2
+    assert snapshot["selected_rows"] == 1
+    assert "checkpoint=1/2" in text
+    assert "stderr_bytes=" in text
+
+
 def test_proicl_condition_command_propagates_vllm_scoring_mode(tmp_path):
     cell = build_signal_cells(
         root=tmp_path / "proicl",

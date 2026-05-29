@@ -130,6 +130,14 @@ class LaunchCell:
         return payload
 
 
+@dataclass(frozen=True)
+class _ActiveCell:
+    proc: subprocess.Popen
+    cell: LaunchCell
+    gpu: str
+    started_at: float
+
+
 def write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -190,6 +198,81 @@ def _tail_text(path: Path, *, max_chars: int = 4000) -> str:
     except OSError:
         return ""
     return text[-max_chars:]
+
+
+def _jsonl_row_count(path: Path) -> int:
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return sum(1 for line in f if line.strip())
+    except OSError:
+        return 0
+
+
+def _cell_checkpoint_status(out: Path) -> dict[str, Any]:
+    status: dict[str, Any] = {
+        "selected_rows": _jsonl_row_count(out / "selected.jsonl"),
+        "completed_problems": None,
+        "expected_problems": None,
+        "checkpoint_complete": None,
+    }
+    checkpoint_path = out / "checkpoint.json"
+    try:
+        checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    except Exception:
+        return status
+    status["completed_problems"] = checkpoint.get("completed_problems")
+    status["expected_problems"] = checkpoint.get("expected_problems")
+    status["checkpoint_complete"] = checkpoint.get("complete")
+    return status
+
+
+def _active_cell_snapshot(active: _ActiveCell, *, now: float) -> dict[str, Any]:
+    out = Path(active.cell.artifact_dir)
+    stderr_path = out / "stderr.log"
+    try:
+        stderr_bytes = stderr_path.stat().st_size
+    except OSError:
+        stderr_bytes = 0
+    status = {
+        "pid": getattr(active.proc, "pid", None),
+        "gpu": active.gpu,
+        "track": active.cell.track,
+        "condition": active.cell.proicl_condition,
+        "shard": active.cell.shard_id,
+        "num_shards": active.cell.num_shards,
+        "artifact_dir": active.cell.artifact_dir,
+        "stderr_log": str(stderr_path),
+        "stderr_bytes": stderr_bytes,
+        "elapsed_seconds": round(max(0.0, now - active.started_at), 1),
+    }
+    status.update(_cell_checkpoint_status(out))
+    return status
+
+
+def _format_active_cell_snapshot(status: dict[str, Any]) -> str:
+    completed = status.get("completed_problems")
+    expected = status.get("expected_problems")
+    if completed is not None and expected is not None:
+        progress = f"checkpoint={completed}/{expected}"
+    else:
+        progress = f"selected_rows={status.get('selected_rows', 0)}"
+    return (
+        "[ProICL] active "
+        f"gpu={status['gpu']} pid={status.get('pid')} "
+        f"elapsed={status['elapsed_seconds']}s "
+        f"track={status['track']} condition={status['condition']} "
+        f"shard={status['shard']}/{status['num_shards']} "
+        f"{progress} stderr_bytes={status['stderr_bytes']} "
+        f"log={status['stderr_log']}"
+    )
+
+
+def _cell_heartbeat_interval_seconds() -> float:
+    raw = os.environ.get("PROICL_CELL_HEARTBEAT_SECONDS", "300")
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return 300.0
 
 
 def source_hash(repo_root: Path) -> str:
@@ -589,10 +672,16 @@ def run_cells(
     queue = [cell for cell in cells if not cell_complete(cell)]
     skipped = len(cells) - len(queue)
     append_event(events_path, "queue_start", cells=len(cells), pending=len(queue), skipped=skipped)
-    active: list[tuple[subprocess.Popen, LaunchCell, str]] = []
+    active: list[_ActiveCell] = []
     available_gpus = list(gpus)
     failures: list[dict[str, Any]] = []
     progress = _make_progress(total=len(cells), initial=skipped, desc="ProICL cells")
+    heartbeat_interval = _cell_heartbeat_interval_seconds()
+    next_heartbeat = (
+        time.monotonic() + heartbeat_interval
+        if heartbeat_interval > 0
+        else float("inf")
+    )
     if skipped:
         _progress_write(progress, f"[ProICL] skipped {skipped} completed cells")
     try:
@@ -659,14 +748,24 @@ def run_cells(
                 proc = subprocess.Popen(cmd, cwd=repo_root, env=env, stdout=stdout, stderr=stderr)
                 stdout.close()
                 stderr.close()
-                active.append((proc, cell, gpu))
+                active.append(
+                    _ActiveCell(
+                        proc=proc,
+                        cell=cell,
+                        gpu=gpu,
+                        started_at=time.monotonic(),
+                    )
+                )
             time.sleep(2)
-            still_active: list[tuple[subprocess.Popen, LaunchCell, str]] = []
-            for proc, cell, gpu in active:
-                rc = proc.poll()
+            now = time.monotonic()
+            still_active: list[_ActiveCell] = []
+            for active_cell in active:
+                rc = active_cell.proc.poll()
                 if rc is None:
-                    still_active.append((proc, cell, gpu))
+                    still_active.append(active_cell)
                     continue
+                cell = active_cell.cell
+                gpu = active_cell.gpu
                 if rc == 0 and cell_complete(cell):
                     available_gpus.append(gpu)
                     progress.update(1)
@@ -698,10 +797,16 @@ def run_cells(
                     append_event(events_path, "cell_failed", **failure)
                     _progress_write(progress, f"[ProICL] failed {failure}")
                     if stop_on_failure:
-                        for live, _, _ in still_active:
-                            live.terminate()
+                        for live in still_active:
+                            live.proc.terminate()
                         raise RuntimeError(f"ProICL cell failed: {failure}")
             active = still_active
+            if active and now >= next_heartbeat:
+                for active_cell in active:
+                    snapshot = _active_cell_snapshot(active_cell, now=now)
+                    append_event(events_path, "cell_heartbeat", **snapshot)
+                    _progress_write(progress, _format_active_cell_snapshot(snapshot))
+                next_heartbeat = now + heartbeat_interval
     finally:
         progress.close()
     append_event(events_path, "queue_done", failures=len(failures))
