@@ -1211,16 +1211,46 @@ if [[ "$DRY_RUN" != "1" && "$SKIP_INSTALL" != "1" ]]; then
     PY="$VENV_PY"
   fi
   run_cmd "$PY" -m pip install -U pip wheel setuptools
+  install_xformers_polyfill() {
+    # xformers 0.0.29.post2 only ships manylinux_2_28 wheels; CentOS 7 has glibc 2.17.
+    # Workaround: download the wheel, retag to manylinux_2_17, install, then
+    # patch its .so files with polyfill-glibc so they resolve glibc symbols >=2.28.
+    local xf_dir="$REPO_ROOT/.cache-xformers-wheel"
+    local polyfill_bin="/share/software/user/open/polyfill-glibc/0.1/bin/polyfill-glibc"
+    local site_pkgs
+    site_pkgs="$($PY -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+    mkdir -p "$xf_dir"
+    run_cmd "$PY" -m pip download --no-deps --dest "$xf_dir" \
+      "xformers==0.0.29.post2" \
+      --python-version 3.12 --platform manylinux_2_28_x86_64 --only-binary=:all:
+    local src_whl="$xf_dir/xformers-0.0.29.post2-cp312-cp312-manylinux_2_28_x86_64.whl"
+    local dst_whl="$xf_dir/xformers-0.0.29.post2-cp312-cp312-manylinux_2_17_x86_64.whl"
+    if [[ -f "$src_whl" ]]; then
+      mv -f "$src_whl" "$dst_whl"
+    fi
+    run_cmd "$PY" -m pip install --force-reinstall --no-deps "$dst_whl"
+    if [[ -x "$polyfill_bin" ]]; then
+      find "$site_pkgs/xformers" -name '*.so' -print0 \
+        | xargs -0 -r -n1 "$polyfill_bin" --target-glibc=2.17 || true
+    else
+      echo "WARNING: polyfill-glibc not found at $polyfill_bin; xformers may fail at runtime on glibc<2.28" >&2
+    fi
+  }
+
   case "$INSTALL_PROFILE" in
     standard|light)
+      run_cmd "$PY" -m pip install "torch==2.6.0" "torchvision==0.21.0" "torchaudio==2.6.0"
+      install_xformers_polyfill
       run_cmd "$PY" -m pip install -r requirements.txt
       if [[ "$REFLECTION_PROVIDER" == "xai" ]]; then
         run_cmd "$PY" -m pip install -e ".[gepa_reflection]"
       fi
       ;;
     full)
+      run_cmd "$PY" -m pip install "torch==2.6.0" "torchvision==0.21.0" "torchaudio==2.6.0"
+      install_xformers_polyfill
       run_cmd "$PY" -m pip install -e ".[code,dc,gepa_reflection]"
-      run_cmd "$PY" -m pip install "vllm==0.9.2"
+      run_cmd "$PY" -m pip install "vllm==0.8.5.post1"
       ;;
     *)
       echo "INSTALL_PROFILE must be standard or full; got $INSTALL_PROFILE" >&2

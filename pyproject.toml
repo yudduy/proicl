@@ -8,16 +8,16 @@ dependencies = [
   "datasets",
   "huggingface-hub>=0.33.0,<1.0",
   "numpy>=1.26,<2.3",
-  "pandas",
-  "pyarrow",
+  "pandas>=2.2,<2.3",
+  "pyarrow>=18.0,<21.0",
   "pylatexenc",
   "reasoning-gym==0.1.25",
-  "scipy",
+  "scipy>=1.13,<1.16",
   "sympy",
   "torch",
   "tqdm",
   "transformers==4.51.3",
-  "wandb",
+  "wandb>=0.17,<0.20",
 ]
 
 [project.optional-dependencies]
