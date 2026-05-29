@@ -1698,6 +1698,14 @@ for row in events:
 
 if gepa_state.get("status") == "active" and pid_alive(gepa_state.get("pid")) == "no":
     gepa_state["status"] = "stale"
+if not gepa_state:
+    gepa_logs = sorted((full / "logs").glob("build_gepa_k*.stderr.log"), key=lambda path: path.stat().st_mtime)
+    if gepa_logs:
+        gepa_state = {"status": "observed", "stderr_log": str(gepa_logs[-1])}
+elif not gepa_state.get("stderr_log"):
+    gepa_logs = sorted((full / "logs").glob("build_gepa_k*.stderr.log"), key=lambda path: path.stat().st_mtime)
+    if gepa_logs:
+        gepa_state["stderr_log"] = str(gepa_logs[-1])
 
 
 print(f"ProICL status: {run_dir}")
