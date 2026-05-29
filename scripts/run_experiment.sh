@@ -62,7 +62,7 @@ Environment knobs:
   WANDB_PROJECT            W&B project when WANDB_API_KEY is set. Default: proicl.
   SKIP_CALIBRATION=1       Require VLLM_PARITY_ARTIFACT instead of running calibration.
   SKIP_SPS_MATH500_CALIBRATION=0 Run the slow SPS-vs-MCMC MATH500 gate. Default: skipped.
-  PYTHON                   Explicit Python 3.11+ interpreter. Overrides VENV auto-detection.
+  PYTHON                   Explicit Python 3.11/3.12 interpreter. Overrides VENV auto-detection.
   SMOKE_ONLY=1             Developer-only: run only the harness smoke.
   INCLUDE_CANDIDATES=1     Include candidates.jsonl in the final bundle.
   PROICL_DISABLE_TQDM=1    Use plain progress lines instead of tqdm.
@@ -160,24 +160,38 @@ SPS_CALIBRATION_TOLERANCE="${SPS_CALIBRATION_TOLERANCE:-0.02}"
 VENV="${VENV:-.venv-eval}"
 VENV_PY="$REPO_ROOT/$VENV/bin/python"
 NEED_CREATE_VENV=0
+python_is_supported() {
+  "$1" - <<'PY' >/dev/null 2>&1
+import sys
+version = sys.version_info[:2]
+raise SystemExit(0 if (3, 11) <= version < (3, 13) else 1)
+PY
+}
 if [[ -n "${PYTHON:-}" ]]; then
   PY="$PYTHON"
 elif [[ -x "$VENV_PY" ]]; then
   PY="$VENV_PY"
 else
   NEED_CREATE_VENV=1
-  if command -v python3 >/dev/null 2>&1; then
-    PY="$(command -v python3)"
-  else
-    PY="python"
+  PY=""
+  for candidate in python3.12 python3.11 python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      candidate_path="$(command -v "$candidate")"
+      if python_is_supported "$candidate_path"; then
+        PY="$candidate_path"
+        break
+      fi
+    fi
+  done
+  if [[ -z "$PY" ]]; then
+    echo "ProICL requires Python 3.11 or 3.12 because vLLM 0.9.2 does not publish Python 3.13+ wheels." >&2
+    echo "Create $VENV with Python 3.11/3.12 or set PYTHON to a supported interpreter." >&2
+    exit 1
   fi
 fi
-if ! "$PY" - <<'PY' >/dev/null 2>&1; then
-import sys
-raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
-PY
-  echo "ProICL requires Python >= 3.11; selected interpreter failed: $PY" >&2
-  echo "Create $VENV with Python 3.11+ or set PYTHON to a supported interpreter." >&2
+if ! python_is_supported "$PY"; then
+  echo "ProICL requires Python 3.11 or 3.12 because vLLM 0.9.2 does not publish Python 3.13+ wheels; selected interpreter failed: $PY" >&2
+  echo "Create $VENV with Python 3.11/3.12 or set PYTHON to a supported interpreter." >&2
   exit 1
 fi
 
